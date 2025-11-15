@@ -2,7 +2,7 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 
-const DBSOURCE = "/data/db.sqlite";
+const DBSOURCE = "./db/db.sqlite";
 
 // Ensure the directory for the database exists
 const dbDir = path.dirname(DBSOURCE);
