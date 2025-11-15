@@ -3,9 +3,11 @@ services:
     name: ai-projekt
     env: node
     plan: free
-    buildCommand: 'npm install && npx puppeteer browsers install chrome'
+    buildCommand: 'npm install'
     startCommand: 'npm start'
     envVars:
+      - key: PUPPETEER_CACHE_DIR
+        value: /opt/render/.cache/puppeteer
       - key: GEMINI_API_KEY
         sync: false
       - key: NODE_VERSION
