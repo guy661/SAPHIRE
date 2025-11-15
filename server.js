@@ -101,80 +101,104 @@ async function detectPaywall(page) {
  */
 async function getPageContentWithPuppeteer(url) {
     let browser;
+    let page;
+    const PUPPETEER_TIMEOUT = 60000; // 60 seconds for the entire operation
+
     try {
-        console.log(`▶️ Starte Puppeteer für ${url}`);
-        browser = await puppeteer.launch({
-            args: [...chromium.args, '--disable-dev-shm-usage'],
-            defaultViewport: chromium.defaultViewport,
-            executablePath: await chromium.executablePath(),
-            headless: chromium.headless,
-            ignoreHTTPSErrors: true
-        });
-        const page = await browser.newPage();
-        
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
+        console.log(`[Puppeteer] ▶️ Starte Puppeteer für ${url}`);
+        const operationPromise = new Promise(async (resolve, reject) => {
+            try {
+                browser = await puppeteer.launch({
+                    args: [...chromium.args, '--disable-dev-shm-usage'],
+                    defaultViewport: chromium.defaultViewport,
+                    executablePath: await chromium.executablePath(),
+                    headless: chromium.headless,
+                    ignoreHTTPSErrors: true
+                });
+                console.log(`[Puppeteer] Browser gestartet.`);
+                page = await browser.newPage();
+                console.log(`[Puppeteer] Neue Seite erstellt.`);
+                
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
+                await page.setViewport({ width: 1280, height: 800 });
+                console.log(`[Puppeteer] User Agent und Viewport gesetzt.`);
 
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        
-        try {
-            await page.waitForSelector('form button', { timeout: 5000 });
-            const clicked = await page.evaluate(() => {
-                const buttons = Array.from(document.querySelectorAll('form button'));
-                if (buttons.length > 0) {
-                    const agreeButton = buttons[buttons.length - 1];
-                    if (agreeButton) {
-                        agreeButton.click();
-                        return true;
+                console.log(`[Puppeteer] Navigiere zu ${url}...`);
+                await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
+                console.log(`[Puppeteer] Navigation abgeschlossen.`);
+                
+                try {
+                    console.log(`[Puppeteer] Suche nach Google-Zustimmungs-Button...`);
+                    await page.waitForSelector('form button', { timeout: 5000 });
+                    const clicked = await page.evaluate(() => {
+                        const buttons = Array.from(document.querySelectorAll('form button'));
+                        if (buttons.length > 0) {
+                            const agreeButton = buttons[buttons.length - 1];
+                            if (agreeButton) {
+                                agreeButton.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    });
+
+                    if (clicked) {
+                        console.log("[Puppeteer] ✅ Google-Zustimmungs-Button via page.evaluate() geklickt.");
+                        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
+                        console.log("[Puppeteer] ✅ Navigation nach Zustimmungs-Klick abgeschlossen.");
                     }
+                } catch (error) {
+                    console.log("[Puppeteer] ... Kein Google-Zustimmungsformular gefunden, fahre mit aktueller Seite fort.");
                 }
-                return false;
-            });
 
-            if (clicked) {
-                console.log("✅ Google-Zustimmungs-Button via page.evaluate() geklickt.");
-                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
-                console.log("✅ Navigation nach Zustimmungs-Klick abgeschlossen.");
+                console.log(`[Puppeteer] Warte auf Seitenstabilität (2s)...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                console.log(`[Puppeteer] Seitenstabilität erreicht.`);
+
+                console.log(`[Puppeteer] Prüfe auf Paywall...`);
+                if (await detectPaywall(page)) {
+                    throw new Error("Inhaltszugang blockiert: Der Artikel scheint hinter einer Paywall zu sein.");
+                }
+                console.log(`[Puppeteer] Paywall-Prüfung abgeschlossen.`);
+
+                const finalUrl = page.url();
+                const fullHtml = await page.content();
+                console.log(`[Puppeteer] HTML-Inhalt von ${finalUrl} abgerufen.`);
+
+                // --- Use Readability for robust article extraction ---
+                console.log(`[Puppeteer] ... Extrahiere Artikeltext mit Readability von: ${finalUrl}`);
+                const doc = new JSDOM(fullHtml, { url: finalUrl });
+                const reader = new Readability(doc.window.document);
+                const article = reader.parse();
+
+                // Check if Readability successfully parsed the article
+                if (!article || !article.textContent) {
+                    console.log("[Puppeteer] ... Readability konnte keinen Inhalt finden. Fallback auf Paragraphen-Extraktion.");
+                    // Fallback to simple paragraph extraction if Readability fails
+                    const paragraphs = Array.from(doc.window.document.body.querySelectorAll('p'));
+                    const fallbackText = paragraphs.map(p => p.textContent.trim()).join('\n\n');
+                    console.log(`[Puppeteer] ✅ ${fallbackText.length} Zeichen via Fallback extrahiert.`);
+                    resolve({ finalUrl, articleText: fallbackText });
+                } else {
+                    const articleText = article.textContent.trim();
+                    console.log(`[Puppeteer] ✅ ${articleText.length} Zeichen mit Readability extrahiert.`);
+                    resolve({ finalUrl, articleText });
+                }
+            } catch (error) {
+                reject(error);
             }
-        } catch (error) {
-            console.log("... Kein Google-Zustimmungsformular gefunden, fahre mit aktueller Seite fort.");
-        }
+        });
 
-        // Wait for the page to settle to avoid "Execution context destroyed" errors
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`Puppeteer operation timed out after ${PUPPETEER_TIMEOUT / 1000} seconds`)), PUPPETEER_TIMEOUT)
+        );
 
-        if (await detectPaywall(page)) {
-            throw new Error("Inhaltszugang blockiert: Der Artikel scheint hinter einer Paywall zu sein.");
-        }
-
-        const finalUrl = page.url();
-        const fullHtml = await page.content();
-
-        // --- Use Readability for robust article extraction ---
-        console.log(`... Extrahiere Artikeltext mit Readability von: ${finalUrl}`);
-        const doc = new JSDOM(fullHtml, { url: finalUrl });
-        const reader = new Readability(doc.window.document);
-        const article = reader.parse();
-
-        // Check if Readability successfully parsed the article
-        if (!article || !article.textContent) {
-            console.log("... Readability konnte keinen Inhalt finden. Fallback auf Paragraphen-Extraktion.");
-            // Fallback to simple paragraph extraction if Readability fails
-            const paragraphs = Array.from(doc.window.document.body.querySelectorAll('p'));
-            const fallbackText = paragraphs.map(p => p.textContent.trim()).join('\n\n');
-            console.log(`✅ ${fallbackText.length} Zeichen via Fallback extrahiert.`);
-            return { finalUrl, articleText: fallbackText };
-        }
-        
-        const articleText = article.textContent.trim();
-        console.log(`✅ ${articleText.length} Zeichen mit Readability extrahiert.`);
-        
-        return { finalUrl, articleText };
+        return await Promise.race([operationPromise, timeoutPromise]);
 
     } finally {
         if (browser) {
             await browser.close();
-            console.log("✅ Puppeteer-Browser geschlossen.");
+            console.log("[Puppeteer] ✅ Puppeteer-Browser geschlossen.");
         }
     }
 }
