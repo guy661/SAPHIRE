@@ -12,6 +12,8 @@ services:
         sync: false
       - key: NODE_VERSION
         value: 18
+      - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
+        value: true
     disks:
       - name: data
         mountPath: /data

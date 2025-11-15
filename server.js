@@ -6,6 +6,7 @@ const fetch = require("node-fetch");
 const { Readability } = require("@mozilla/readability");
 const { JSDOM } = require("jsdom");
 const puppeteer = require("puppeteer");
+const chromium = require('@sparticuz/chromium');
 const path = require('path'); 
 const db = require('./database.js');
 
@@ -102,7 +103,13 @@ async function getPageContentWithPuppeteer(url) {
     let browser;
     try {
         console.log(`▶️ Starte Puppeteer für ${url}`);
-        browser = await puppeteer.launch({ headless: "new" });
+        browser = await puppeteer.launch({
+            args: [...chromium.args, '--disable-dev-shm-usage'],
+            defaultViewport: chromium.defaultViewport,
+            executablePath: await chromium.executablePath(),
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true
+        });
         const page = await browser.newPage();
         
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
