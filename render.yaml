@@ -5,7 +5,7 @@ services:
     plan: free
     buildCommand: 'npm install'
     startCommand: 'npm start'
-    preStartCommand: 'rm -f /data/db.sqlite && mkdir -p /data && chmod 777 /data'
+    preStartCommand: 'rm -f /data/db.sqlite'
     envVars:
       - key: PUPPETEER_CACHE_DIR
         value: /opt/render/.cache/puppeteer
