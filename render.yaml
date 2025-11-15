@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: ai-projekt
+    env: node
+    plan: free
+    buildCommand: 'npm install && npx puppeteer browsers install chrome'
+    startCommand: 'npm start'
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: 18
+    disks:
+      - name: data
+        mountPath: /data
+        sizeGB: 1
