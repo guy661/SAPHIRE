@@ -347,24 +347,49 @@ function main() {
         const { articles, length } = req.body;
         if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
+        const CONCURRENCY_LIMIT = 3; // Limit concurrent Puppeteer instances
         const successfulSummaries = [];
         const failedArticles = [];
+        let activePromises = 0;
+        let articleIndex = 0;
 
-        for (const article of articles) {
-            if (successfulSummaries.length >= 3) {
-                break; // We have enough summaries
+        const processNextArticle = async () => {
+            if (articleIndex >= articles.length) {
+                return; // No more articles to process
             }
+
+            const currentArticle = articles[articleIndex++];
+            activePromises++;
 
             try {
-                const summary = await summarizeSingleArticle(article, length);
+                const summary = await summarizeSingleArticle(currentArticle, length);
                 successfulSummaries.push(summary);
             } catch (error) {
-                console.error(`Failed to process article ${article.link}:`, error.message);
+                console.error(`Failed to process article ${currentArticle.link}:`, error.message);
                 failedArticles.push({
-                    link: article.link,
+                    link: currentArticle.link,
                     error: error.message,
                 });
+            } finally {
+                activePromises--;
+                // If there are more articles and we haven't reached the desired number of summaries,
+                // or if we still have active promises, continue processing.
+                if (articleIndex < articles.length && successfulSummaries.length < CONCURRENCY_LIMIT) {
+                    await processNextArticle();
+                }
             }
+        };
+
+        // Start initial concurrent processes
+        const initialPromises = [];
+        for (let i = 0; i < CONCURRENCY_LIMIT && i < articles.length; i++) {
+            initialPromises.push(processNextArticle());
+        }
+        await Promise.allSettled(initialPromises);
+
+        // Wait for any remaining active promises to complete if they were started
+        while (activePromises > 0) {
+            await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to prevent busy-waiting
         }
 
         console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
