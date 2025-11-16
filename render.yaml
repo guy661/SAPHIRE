@@ -14,3 +14,5 @@ services:
         value: 18
       - key: PUPPETEER_SKIP_CHROMIUM_DOWNLOAD
         value: true
+      - key: PUPPETEER_CONCURRENCY
+        value: 1
