@@ -12,7 +12,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 const fs = require("fs");
 const { Cluster } = require('puppeteer-cluster');
-const proxyChain = require('proxy-chain');
+
 
 const path = require('path');
 const db = require('./database.js');
@@ -33,22 +33,6 @@ function chunkText(text, chunkSize = 8000) {
         chunks.push(text.substring(i, i + chunkSize));
     }
     return chunks;
-}
-
-async function resolveRedirect(url) {
-    try {
-        const response = await fetch(url, {
-            redirect: 'follow',
-            timeout: 15000, // 15-second timeout
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-            }
-        });
-        return response.url;
-    } catch (error) {
-        console.error(`Redirect resolution failed for ${url}: ${error.message}`);
-        return url; // Fallback to the original URL on error
-    }
 }
 
 async function detectPaywall(page) {
@@ -129,23 +113,14 @@ async function main() {
         process.exit(1);
     }
 
-    const puppeteerOptions = {
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-    };
-
-    if (process.env.PROXY_URL) {
-        console.log(`[Server] Anonymizing proxy: ${process.env.PROXY_URL}`);
-        const newProxyUrl = await proxyChain.anonymizeProxy(process.env.PROXY_URL);
-        puppeteerOptions.args.push(`--proxy-server=${newProxyUrl}`);
-        console.log(`[Server] Using anonymized proxy for Puppeteer.`);
-    }
-
     const cluster = await Cluster.launch({
         concurrency: Cluster.CONCURRENCY_PAGE,
         maxConcurrency: 8, // Increased concurrency
         puppeteer: puppeteer,
-        puppeteerOptions: puppeteerOptions,
+        puppeteerOptions: {
+            headless: true,
+            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        },
         timeout: 120000 // 2 minutes timeout for a task
     });
 
@@ -180,59 +155,88 @@ async function main() {
         let articleText;
         let finalUrl = link;
 
-        // 2. Puppeteer Path (Primary Method)
-        console.log(`[Puppeteer] Processing ${link}`);
+        // 2. Fast Path Attempt (Lightweight Fetch)
         try {
-            await page.setRequestInterception(true);
-            page.on('request', (req) => {
-                const resourceType = req.resourceType();
-                if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' || resourceType === 'media') {
-                    req.abort();
-                } else {
-                    req.continue();
-                }
+            console.log(`[Fast Path] Attempting lightweight fetch for ${link}`);
+            const response = await fetch(link, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                },
+                timeout: 15000 // 15 second timeout for fast path
             });
 
-            await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 40000 });
-
-            // Aggressive consent button clicking
-            try {
-                await page.evaluate(() => {
-                    const selectors = [
-                        'button[id*="consent"]', 'button[class*="consent"]', 'button[id*="accept"]', 'button[class*="accept"]',
-                        'button[aria-label*="consent"]', 'button[aria-label*="accept"]', 'button:has-text("Accept all")',
-                        'button:has-text("Zustimmen")'
-                    ];
-                    const consentButton = document.querySelector(selectors.join(', '));
-                    if (consentButton) consentButton.click();
-                });
-                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-            } catch (e) { /* ignore */ }
-
-            if (await detectPaywall(page)) {
-                throw new Error("Paywall detected.");
-            }
-
-            finalUrl = page.url();
-            const bodyHtml = await page.content();
-            const doc = new JSDOM(bodyHtml, { url: finalUrl });
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            
+            finalUrl = response.url;
+            const html = await response.text();
+            const doc = new JSDOM(html, { url: finalUrl });
             const reader = new Readability(doc.window.document);
             const readableArticle = reader.parse();
-            
-            if (!readableArticle || !readableArticle.textContent || readableArticle.textContent.length < 100) {
-                 // If Readability fails, grab all paragraph text as a last resort
-                articleText = await page.evaluate(() => {
-                    return Array.from(document.querySelectorAll('p')).map(p => p.textContent).join('\n');
-                });
-            } else {
-                articleText = readableArticle.textContent;
-            }
 
-        } catch (puppeteerError) {
-            throw new Error(`Puppeteer failed for ${link}: ${puppeteerError.message}`);
+            if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
+                console.log(`[Fast Path] ✅ Success for ${link}`);
+                articleText = readableArticle.textContent;
+            } else {
+                throw new Error('Lightweight extraction failed to get enough content.');
+            }
+        } catch (fastPathError) {
+            // 3. Puppeteer Path (as fallback)
+            console.log(`[Fast Path] ❌ Failed: ${fastPathError.message}. Falling back to Puppeteer for ${link}`);
+            
+            try {
+                await page.setRequestInterception(true);
+                page.on('request', (req) => {
+                    const resourceType = req.resourceType();
+                    if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' || resourceType === 'media') {
+                        req.abort();
+                    } else {
+                        req.continue();
+                    }
+                });
+
+                await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 40000 });
+
+                // Aggressive consent button clicking
+                try {
+                    await page.evaluate(() => {
+                        const selectors = [
+                            'button[id*="consent"]', 'button[class*="consent"]', 'button[id*="accept"]', 'button[class*="accept"]',
+                            'button[aria-label*="consent"]', 'button[aria-label*="accept"]', 'button:has-text("Accept all")',
+                            'button:has-text("Zustimmen")'
+                        ];
+                        const consentButton = document.querySelector(selectors.join(', '));
+                        if (consentButton) consentButton.click();
+                    });
+                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+                } catch (e) { /* ignore */ }
+
+                if (await detectPaywall(page)) {
+                    throw new Error("Paywall detected.");
+                }
+
+                finalUrl = page.url();
+                const bodyHtml = await page.content();
+                const doc = new JSDOM(bodyHtml, { url: finalUrl });
+                const reader = new Readability(doc.window.document);
+                const readableArticle = reader.parse();
+                
+                if (!readableArticle || !readableArticle.textContent || readableArticle.textContent.length < 100) {
+                     // If Readability fails, grab all paragraph text as a last resort
+                    articleText = await page.evaluate(() => {
+                        return Array.from(document.querySelectorAll('p')).map(p => p.textContent).join('\n');
+                    });
+                } else {
+                    articleText = readableArticle.textContent;
+                }
+
+            } catch (puppeteerError) {
+                throw new Error(`Puppeteer failed for ${link}: ${puppeteerError.message}`);
+            }
         }
 
-        // 3. Final checks and summarization
+        // 4. Final checks and summarization
         if (finalUrl.endsWith('.pdf') || finalUrl.includes('youtube.com')) {
             throw new Error(`Skipping PDF/Video: ${finalUrl}`);
         }
@@ -243,7 +247,7 @@ async function main() {
         const summarizedText = await summarizeText(articleText, length);
         const newSummary = { title: article.title, summary: summarizedText, link: article.link, date: article.pubDate };
         
-        // 4. Save to DB
+        // 5. Save to DB
         db.run(
             `INSERT INTO articles (link, title, summary, date, open_count, cached_at) VALUES (?, ?, ?, ?, 1, datetime('now')) ON CONFLICT(link) DO UPDATE SET title=excluded.title, summary=excluded.summary, date=excluded.date, open_count=open_count+1, cached_at=datetime('now')`,
             [newSummary.link, newSummary.title, newSummary.summary, newSummary.date]
@@ -293,7 +297,7 @@ async function main() {
 
             const cleanedItems = feed.items.map(item => {
                 const content = item.content || item.contentSnippet || '';
-                const urlMatch = content.match(/<a href="(.*?)">/);
+                const urlMatch = content.match(/<a href="([^"]*)"/);
                 return { ...item, link: urlMatch ? urlMatch[1] : item.link };
             }).slice(0, 10);
 
@@ -313,28 +317,17 @@ async function main() {
                 return res.status(400).json({ error: "Keine Artikel übergeben" });
             }
 
-            // --- Resolve redirects before processing ---
-            console.log("Resolving redirects for all articles...");
-            const resolvedArticles = await Promise.all(
-                articles.map(async (article) => {
-                    const finalUrl = await resolveRedirect(article.link);
-                    console.log(`Redirect resolved: ${article.link} -> ${finalUrl}`);
-                    return { ...article, link: finalUrl };
-                })
-            );
-            console.log("All redirects resolved.");
-
             const successfulSummaries = [];
             const failedArticles = [];
             const SUMMARY_TARGET = 3;
             const BATCH_SIZE = 5; // Process 5 articles at a time
 
-            for (let i = 0; i < resolvedArticles.length; i += BATCH_SIZE) {
+            for (let i = 0; i < articles.length; i += BATCH_SIZE) {
                 if (successfulSummaries.length >= SUMMARY_TARGET) {
                     break; // Stop processing if we already have enough summaries
                 }
 
-                const batch = resolvedArticles.slice(i, i + BATCH_SIZE);
+                const batch = articles.slice(i, i + BATCH_SIZE);
                 console.log(`Processing batch of ${batch.length} articles...`);
                 
                 const promises = batch.map(article => cluster.execute({ article, length }));
