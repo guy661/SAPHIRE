@@ -329,14 +329,11 @@ async function main() {
             const feed = await parser.parseString(xml);
             if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
 
-            console.log("Resolving redirects for RSS feed items with Puppeteer...");
-            const cleanedItems = await Promise.all(
-                feed.items.slice(0, 10).map(async (item) => {
-                    const resolvedLink = await cluster.execute('resolveGoogleNewsRedirect', { googleNewsUrl: item.link });
-                    return { ...item, link: resolvedLink };
-                })
-            );
-            console.log("All RSS feed item redirects resolved with Puppeteer.");
+            const cleanedItems = feed.items.slice(0, 10).map(item => {
+                // Temporarily bypass Puppeteer redirect resolution for debugging
+                // Reverting to original item.link for now
+                return { ...item, link: item.link };
+            });
 
             res.json(cleanedItems);
         } catch (err) {
