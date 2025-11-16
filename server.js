@@ -12,6 +12,7 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 const fs = require("fs");
 const { Cluster } = require('puppeteer-cluster');
+const proxyChain = require('proxy-chain');
 
 const path = require('path');
 const db = require('./database.js');
@@ -36,10 +37,12 @@ function chunkText(text, chunkSize = 8000) {
 
 async function resolveRedirect(url) {
     try {
-        const response = await fetch(url, { 
-            method: 'HEAD', // Use HEAD request for efficiency, we only need the final URL
+        const response = await fetch(url, {
             redirect: 'follow',
-            timeout: 10000 // 10-second timeout
+            timeout: 15000, // 15-second timeout
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
         });
         return response.url;
     } catch (error) {
@@ -126,14 +129,23 @@ async function main() {
         process.exit(1);
     }
 
+    const puppeteerOptions = {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+    };
+
+    if (process.env.PROXY_URL) {
+        console.log(`[Server] Anonymizing proxy: ${process.env.PROXY_URL}`);
+        const newProxyUrl = await proxyChain.anonymizeProxy(process.env.PROXY_URL);
+        puppeteerOptions.args.push(`--proxy-server=${newProxyUrl}`);
+        console.log(`[Server] Using anonymized proxy for Puppeteer.`);
+    }
+
     const cluster = await Cluster.launch({
         concurrency: Cluster.CONCURRENCY_PAGE,
         maxConcurrency: 8, // Increased concurrency
         puppeteer: puppeteer,
-        puppeteerOptions: {
-            headless: true,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        },
+        puppeteerOptions: puppeteerOptions,
         timeout: 120000 // 2 minutes timeout for a task
     });
 
