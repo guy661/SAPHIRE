@@ -8,6 +8,7 @@ const fetch = require("node-fetch");
 const { Readability } = require("@mozilla/readability");
 const { JSDOM } = require("jsdom");
 const puppeteer = require("puppeteer");
+const fs = require("fs");
 
 const path = require('path');
 const db = require('./database.js');
@@ -276,6 +277,7 @@ async function summarizeSingleArticle(article, length = 'medium', browser) {
                     }
                 } catch (fastPathError) {
                     console.log(`[Fast Path] ❌ Failed: ${fastPathError.message}. Falling back to Puppeteer.`);
+                    fs.appendFileSync('failed_urls.log', link + '\n');
                     const puppeteerResult = await getPageContentWithPuppeteer(link, browser);
                     articleText = puppeteerResult.articleText;
                     finalUrl = puppeteerResult.finalUrl;
