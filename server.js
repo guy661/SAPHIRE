@@ -100,6 +100,23 @@ async function detectPaywall(page) {
     return false;
 }
 
+// --- Global Helper for Gemini API ---
+async function callGemini(prompt) {
+    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const response = await fetch(geminiApiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
+    }
+    const data = await response.json();
+    // Add optional chaining to prevent errors if the response structure is unexpected
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+}
+
 /**
  * Uses Puppeteer to get a page's HTML, then aggressively cleans junk elements
  * before passing the result to Readability.
@@ -121,7 +138,7 @@ async function main() {
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         },
-        timeout: 120000 // 2 minutes timeout for a task
+        timeout: 180000 // 3 minutes timeout for a task
     });
 
     console.log('[Server] ✅ Puppeteer cluster launched successfully.');
@@ -196,7 +213,7 @@ async function main() {
                     }
                 });
 
-                await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 40000 });
+                await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 60000 });
 
                 // Aggressive consent button clicking
                 try {
