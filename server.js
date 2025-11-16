@@ -330,71 +330,75 @@ function main() {
 
     // ===== AI-Zusammenfassung =====
     app.post("/summarize", async (req, res) => {
-        console.log("Summarize endpoint called");
-        try {
-            const { articles, length } = req.body;
-            if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
+      console.log("Summarize endpoint called");
+      try {
+        const { articles, length } = req.body;
+        if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
-            const CONCURRENCY_LIMIT = parseInt(process.env.PUPPETEER_CONCURRENCY, 10) || 2;
-            console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT}. You can adjust this with the PUPPETEER_CONCURRENCY environment variable.`);
-            const articlesToProcess = [...articles];
-            const successfulSummaries = [];
-            const failedArticles = [];
+        const CONCURRENCY_LIMIT = parseInt(process.env.PUPPETEER_CONCURRENCY, 10) || 2;
+        console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT}. You can adjust this with the PUPPETEER_CONCURRENCY environment variable.`);
+        const articlesToProcess = [...articles];
+        const successfulSummaries = [];
+        const failedArticles = [];
 
-            async function worker() {
-                const browser = await puppeteer.launch({
-                    args: [...chromium.args, '--disable-dev-shm-usage'],
-                    defaultViewport: chromium.defaultViewport,
-                    executablePath: await chromium.executablePath(),
-                    headless: chromium.headless,
-                    ignoreHTTPSErrors: true
-                });
-                console.log(`[Worker] Browser instance launched.`);
+        // Fetch executable path once to prevent race conditions
+        const executablePath = await chromium.executablePath();
+        console.log(`[Server] Chromium executable path: ${executablePath}`);
 
-                try {
-                    while (articlesToProcess.length > 0) {
-                        const article = articlesToProcess.shift();
-                        if (article) {
-                            try {
-                                const summary = await summarizeSingleArticle(article, length, browser);
-                                successfulSummaries.push(summary);
-                            } catch (error) {
-                                console.error(`Failed to process article ${article.link}:`, error.message);
-                                failedArticles.push({
-                                    link: article.link,
-                                    error: error.message,
-                                });
-                            }
+        async function worker() {
+            const browser = await puppeteer.launch({
+                args: [...chromium.args, '--disable-dev-shm-usage'],
+                defaultViewport: chromium.defaultViewport,
+                executablePath: executablePath, // Use pre-fetched path
+                headless: chromium.headless,
+                ignoreHTTPSErrors: true
+            });
+            console.log(`[Worker] Browser instance launched.`);
+
+            try {
+                while (articlesToProcess.length > 0) {
+                    const article = articlesToProcess.shift();
+                    if (article) {
+                        try {
+                            const summary = await summarizeSingleArticle(article, length, browser);
+                            successfulSummaries.push(summary);
+                        } catch (error) {
+                            console.error(`Failed to process article ${article.link}:`, error.message);
+                            failedArticles.push({
+                                link: article.link,
+                                error: error.message,
+                            });
                         }
                     }
-                } finally {
-                    await browser.close();
-                    console.log(`[Worker] Browser instance closed.`);
                 }
+            } finally {
+                await browser.close();
+                console.log(`[Worker] Browser instance closed.`);
             }
-
-            const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
-            await Promise.all(workers);
-
-            console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
-
-            if (successfulSummaries.length === 0 && failedArticles.length > 0) {
-                return res.status(500).json({
-                    error: "Konnte keine Artikel zusammenfassen.",
-                    details: failedArticles
-                });
-            }
-
-            // Sort summaries to match original article order for consistency
-            const originalOrder = articles.map(a => a.link);
-            successfulSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
-
-            res.json(successfulSummaries);
-
-        } catch (err) {
-            console.error(err);
-            res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
         }
+
+        const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
+        await Promise.all(workers);
+
+        console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
+
+        if (successfulSummaries.length === 0 && failedArticles.length > 0) {
+            return res.status(500).json({ 
+                error: "Konnte keine Artikel zusammenfassen.",
+                details: failedArticles 
+            });
+        }
+
+        // Sort summaries to match original article order for consistency
+        const originalOrder = articles.map(a => a.link);
+        successfulSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
+
+        res.json(successfulSummaries);
+
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
+      }
     });
 
     // ===== statische Dateien =====
