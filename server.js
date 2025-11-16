@@ -1,3 +1,5 @@
+console.log('--- RUNNING SERVER.JS VERSION 2 ---');
+
 const express = require("express");
 const cors = require("cors");
 const bodyParser = require("body-parser");
@@ -6,7 +8,7 @@ const fetch = require("node-fetch");
 const { Readability } = require("@mozilla/readability");
 const { JSDOM } = require("jsdom");
 const puppeteer = require("puppeteer");
-const chromium = require('@sparticuz/chromium');
+
 const path = require('path');
 const db = require('./database.js');
 
@@ -110,6 +112,16 @@ async function getPageContentWithPuppeteer(url, browser) {
             page = await browser.newPage();
             console.log(`[Puppeteer] Neue Seite erstellt.`);
 
+            // --- OPTIMIZATION: Block non-essential resources ---
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+                if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+                    req.abort();
+                } else {
+                    req.continue();
+                }
+            });
+
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
             await page.setViewport({ width: 1280, height: 800 });
             console.log(`[Puppeteer] User Agent und Viewport gesetzt.`);
@@ -141,10 +153,6 @@ async function getPageContentWithPuppeteer(url, browser) {
             } catch (error) {
                 console.log("[Puppeteer] ... Kein Google-Zustimmungsformular gefunden, fahre mit aktueller Seite fort.");
             }
-
-            console.log(`[Puppeteer] Warte auf Seitenstabilität (2s)...`);
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            console.log(`[Puppeteer] Seitenstabilität erreicht.`);
 
             console.log(`[Puppeteer] Prüfe auf Paywall...`);
             if (await detectPaywall(page)) {
@@ -213,25 +221,66 @@ async function callGemini(prompt) {
 async function summarizeSingleArticle(article, length = 'medium', browser) {
     return new Promise((resolve, reject) => {
         const link = article.link;
-        db.get("SELECT * FROM articles WHERE link = ?", [link], async (err, row) => {
-            if (err) {
-                return reject(err);
-            }
+        const CACHE_DURATION_HOURS = 24;
 
-            if (row && row.open_count >= 10) {
-                return reject(new Error("Inhaltszugang blockiert: Der Artikel wurde bereits 10 Mal geöffnet."));
+        db.get("SELECT title, summary, date, cached_at FROM articles WHERE link = ?", [link], async (err, row) => {
+            if (err) return reject(err);
+
+            if (row && row.summary) {
+                const cachedDate = new Date(row.cached_at);
+                const now = new Date();
+                const hoursDiff = (now - cachedDate) / (1000 * 60 * 60);
+                if (hoursDiff < CACHE_DURATION_HOURS) {
+                    console.log(`[Cache] ✅ HIT for ${link}`);
+                    return resolve({ title: row.title, summary: row.summary, link: link, date: row.date });
+                }
+                console.log(`[Cache] Stale cache for ${link}`);
+            } else {
+                console.log(`[Cache] ❌ MISS for ${link}`);
             }
 
             try {
-                const articleDate = new Date(article.pubDate);
-                const thirtyDaysAgo = new Date();
-                thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+                let articleText;
+                let finalUrl = link;
 
-                if (articleDate < thirtyDaysAgo) {
-                    throw new Error("Inhaltszugang blockiert: Der eigentliche Artikel ist für den Nutzer nicht zugänglich, da der bereitgestellte Link älter als 30 Tage ist.");
+                // --- OPTIMIZATION: Hybrid Content Extraction ---
+                try {
+                    console.log(`[Fast Path] Attempting lightweight fetch for ${link}`);
+                    const response = await fetch(link, {
+                        headers: {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
+                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9',
+                            'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                            'Accept-Encoding': 'gzip, deflate, br',
+                            'Connection': 'keep-alive',
+                            'Upgrade-Insecure-Requests': '1',
+                            'Sec-Fetch-Dest': 'document',
+                            'Sec-Fetch-Mode': 'navigate',
+                            'Sec-Fetch-Site': 'none',
+                            'Sec-Fetch-User': '?1',
+                        }
+                    });
+                    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+                    
+                    finalUrl = response.url; // Use the final URL after redirects
+                    const html = await response.text();
+                    const doc = new JSDOM(html, { url: finalUrl });
+                    const reader = new Readability(doc.window.document);
+                    const readableArticle = reader.parse();
+
+                    if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
+                        console.log(`[Fast Path] ✅ Success for ${link}`);
+                        articleText = readableArticle.textContent;
+                    } else {
+                        throw new Error('Lightweight extraction failed to get enough content.');
+                    }
+                } catch (fastPathError) {
+                    console.log(`[Fast Path] ❌ Failed: ${fastPathError.message}. Falling back to Puppeteer.`);
+                    const puppeteerResult = await getPageContentWithPuppeteer(link, browser);
+                    articleText = puppeteerResult.articleText;
+                    finalUrl = puppeteerResult.finalUrl;
                 }
-
-                const { finalUrl, articleText } = await getPageContentWithPuppeteer(article.link, browser);
+                // --- End of Hybrid Extraction ---
 
                 if (finalUrl.endsWith('.pdf') || finalUrl.includes('youtube.com')) {
                     throw new Error(`Überspringe Artikel (PDF/Video): ${finalUrl}`);
@@ -249,50 +298,44 @@ async function summarizeSingleArticle(article, length = 'medium', browser) {
                     medium: "Zusammenfassung (Überblick + 3-4 Stichpunkte):",
                     long: "Detaillierte Zusammenfassung (Überblick + 5-6 Stichpunkte mit Erklärungen):"
                 };
-
                 const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
 
                 if (chunks.length > 1) {
-                    console.log(`📝 Artikel wird in ${chunks.length} Teile für ${article.link} aufgeteilt`);
-                    const chunkSummaryPromises = chunks.map(chunk => {
-                        const prompt = `Zusammenfassung des Abschnitts:\n\n${chunk}`;
-                        return callGemini(prompt);
-                    });
+                    const chunkSummaryPromises = chunks.map(chunk => callGemini(`Zusammenfassung des Abschnitts:\n\n${chunk}`));
                     const chunkSummaries = await Promise.all(chunkSummaryPromises);
-                    const combinationPrompt = `
-                        Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.
-                        ${basePrompt}
-                        Zusammenfassungen:\n${chunkSummaries.join("\n---\n")}`;
+                    const combinationPrompt = `Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.\n${basePrompt}\nZusammenfassungen:\n${chunkSummaries.join("\n---\n")}`;
                     summarizedText = await callGemini(combinationPrompt);
                 } else {
-                    console.log(`📝 Artikel wird direkt für ${article.link} zusammengefasst`);
-                    const prompt = `
-                        ${basePrompt}
-                        Artikel:\n${text}`;
+                    const prompt = `${basePrompt}\nArtikel:\n${text}`;
                     summarizedText = await callGemini(prompt);
                 }
 
-                console.log(`✅ Endgültige Zusammenfassung für ${article.link} erstellt`);
-                const summary = {
-                  title: article.title,
-                  summary: summarizedText,
-                  link: article.link,
-                  date: article.pubDate,
+                const newSummary = {
+                    title: article.title,
+                    summary: summarizedText,
+                    link: article.link,
+                    date: article.pubDate,
                 };
 
-                if (row) {
-                    db.run("UPDATE articles SET open_count = open_count + 1 WHERE link = ?", [link], (err) => {
-                        if (err) console.error(err);
-                    });
-                } else {
-                    db.run("INSERT INTO articles (link, open_count) VALUES (?, 1)", [link], (err) => {
-                        if (err) console.error(err);
-                    });
-                }
-                resolve(summary);
+                db.run(
+                    `INSERT INTO articles (link, title, summary, date, open_count, cached_at) 
+                     VALUES (?, ?, ?, ?, 1, datetime('now'))
+                     ON CONFLICT(link) DO UPDATE SET
+                        title = excluded.title,
+                        summary = excluded.summary,
+                        date = excluded.date,
+                        open_count = open_count + 1,
+                        cached_at = datetime('now')`,
+                    [newSummary.link, newSummary.title, newSummary.summary, newSummary.date],
+                    (err) => {
+                        if (err) console.error(`[DB] Error saving summary for ${link}:`, err.message);
+                        else console.log(`[DB] ✅ Saved new summary for ${link}`);
+                    }
+                );
+                resolve(newSummary);
 
             } catch (articleError) {
-                console.error(`Fehler bei der Verarbeitung des Artikels ${article.link}:`, articleError.message);
+                console.error(`Fehler bei der Verarbeitung des Artikels ${link}:`, articleError.message);
                 reject(articleError);
             }
         });
@@ -311,14 +354,8 @@ async function main() {
     // --- Launch persistent browser ---
     console.log('[Server] Initializing persistent browser instance...');
     try {
-        const executablePath = await chromium.executablePath();
-        browser = await puppeteer.launch({
-            args: [...chromium.args, '--disable-dev-shm-usage', '--no-sandbox'],
-            defaultViewport: chromium.defaultViewport,
-            executablePath: executablePath,
-            headless: chromium.headless,
-            ignoreHTTPSErrors: true
-        });
+        // Attempt a default launch, assuming the browser has been downloaded by setup.js
+        browser = await puppeteer.launch({ headless: true });
         console.log('[Server] ✅ Persistent browser instance launched successfully.');
         
         // Gracefully close browser on application shutdown
@@ -334,14 +371,16 @@ async function main() {
         process.on('SIGTERM', cleanup);
 
     } catch (e) {
-        console.error('[Server] ‼️ Failed to launch persistent browser instance:', e);
+        console.error('[Server] ‼️ Failed to launch browser instance:', e.message);
+        console.error('[Server] Es scheint, dass der Browser nicht heruntergeladen ist. Bitte führen Sie zuerst das Setup-Skript aus.');
+        console.error('[Server] Führen Sie im Terminal aus: node setup.js');
         process.exit(1);
     }
 
 
     const app = express();
     app.use(cors());
-    app.use(bodyParser.json());
+    app.use(express.json());
 
     const parser = new Parser();
 
@@ -356,7 +395,22 @@ async function main() {
             const xml = await response.text();
             const feed = await parser.parseString(xml);
             if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
-            res.json(feed.items.slice(0, 10));
+
+            // --- NEW LOGIC: Extract the real URL ---
+            const cleanedItems = feed.items.map(item => {
+                // The real URL is in the description/content snippet
+                const content = item.content || item.contentSnippet || '';
+                const urlMatch = content.match(/<a href="(.*?)">/);
+                const realUrl = urlMatch ? urlMatch[1] : item.link; // Fallback to original link
+
+                return {
+                    ...item,
+                    link: realUrl // Overwrite the link property with the real one
+                };
+            }).slice(0, 10);
+
+            res.json(cleanedItems);
+
         } catch (err) {
             console.error(err);
             res.status(500).json({ error: err.message || "Fehler beim Abrufen des RSS-Feeds" });
@@ -375,7 +429,7 @@ async function main() {
             const { articles, length } = req.body;
             if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
-            const CONCURRENCY_LIMIT = parseInt(process.env.PUPPETEER_CONCURRENCY, 10) || 2;
+            const CONCURRENCY_LIMIT = 3;
             console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT} pages.`);
             const articlesToProcess = [...articles];
             const successfulSummaries = [];
@@ -430,14 +484,17 @@ async function main() {
     });
 
     // ===== statische Dateien =====
-    app.use(express.static(path.join(__dirname, 'public')));
-
+    // Handle the root route explicitly first to ensure it's always served
     app.get('/', (req, res) => {
         res.set('Cache-Control', 'no-store'); // optional
         res.sendFile(path.join(__dirname, 'public', 'AI-Projekt.html'));
     });
 
-    const PORT = process.env.PORT || 3000;
+    // Then, serve other static files from the 'public' directory
+    app.use(express.static(path.join(__dirname, 'public')));
+
+    const PORT = process.env.PORT || 3001;
+    console.log(`[Server] Attempting to listen on port: ${PORT}`);
     app.listen(PORT, () => console.log(`✅ Server läuft auf http://localhost:${PORT}`));
 }
 
