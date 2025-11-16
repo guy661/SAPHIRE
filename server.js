@@ -119,6 +119,7 @@ async function callGemini(prompt) {
 
 async function summarizeArticleTask({ page, data: { article, length } }) {
     const link = article.link;
+    console.log('summarizeArticleTask started for link:', link);
 
     // 1. Check cache first
     const cachedArticle = await new Promise((resolve, reject) => {
@@ -364,7 +365,10 @@ async function main() {
                 const batch = articles.slice(i, i + BATCH_SIZE);
                 console.log(`Processing batch of ${batch.length} articles...`);
                 
-                const promises = batch.map(article => cluster.execute({ article, length }));
+                const promises = batch.map(article => {
+                    console.log('Executing default cluster task for article:', article.link, 'Type of summarizeArticleTask:', typeof summarizeArticleTask);
+                    return cluster.execute({ article, length });
+                });
                 const results = await Promise.allSettled(promises);
 
                 results.forEach((result, index) => {
