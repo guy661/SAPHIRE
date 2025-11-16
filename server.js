@@ -3,7 +3,6 @@
 
 // --- Puppeteer Cluster Task Definitions ---
 
-}
 
 async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) {
     try {
@@ -180,6 +179,7 @@ async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) 
     );
 
     return newSummary;
+}
 
 
 async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) {
