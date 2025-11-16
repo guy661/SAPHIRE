@@ -34,6 +34,20 @@ function chunkText(text, chunkSize = 8000) {
     return chunks;
 }
 
+async function resolveRedirect(url) {
+    try {
+        const response = await fetch(url, { 
+            method: 'HEAD', // Use HEAD request for efficiency, we only need the final URL
+            redirect: 'follow',
+            timeout: 10000 // 10-second timeout
+        });
+        return response.url;
+    } catch (error) {
+        console.error(`Redirect resolution failed for ${url}: ${error.message}`);
+        return url; // Fallback to the original URL on error
+    }
+}
+
 async function detectPaywall(page) {
     // 1. JSON-LD Check
     try {
@@ -287,17 +301,28 @@ async function main() {
                 return res.status(400).json({ error: "Keine Artikel übergeben" });
             }
 
+            // --- Resolve redirects before processing ---
+            console.log("Resolving redirects for all articles...");
+            const resolvedArticles = await Promise.all(
+                articles.map(async (article) => {
+                    const finalUrl = await resolveRedirect(article.link);
+                    console.log(`Redirect resolved: ${article.link} -> ${finalUrl}`);
+                    return { ...article, link: finalUrl };
+                })
+            );
+            console.log("All redirects resolved.");
+
             const successfulSummaries = [];
             const failedArticles = [];
             const SUMMARY_TARGET = 3;
             const BATCH_SIZE = 5; // Process 5 articles at a time
 
-            for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+            for (let i = 0; i < resolvedArticles.length; i += BATCH_SIZE) {
                 if (successfulSummaries.length >= SUMMARY_TARGET) {
                     break; // Stop processing if we already have enough summaries
                 }
 
-                const batch = articles.slice(i, i + BATCH_SIZE);
+                const batch = resolvedArticles.slice(i, i + BATCH_SIZE);
                 console.log(`Processing batch of ${batch.length} articles...`);
                 
                 const promises = batch.map(article => cluster.execute({ article, length }));
