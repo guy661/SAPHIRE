@@ -306,69 +306,74 @@ async function main() {
     });
 
     // ===== AI-Zusammenfassung =====
-    app.post("/summarize", async (req, res) => {
+    app.post("/summarize", (req, res) => {
         console.log("Summarize endpoint called");
         try {
             const { articles, length } = req.body;
-            if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
+            if (!articles?.length) {
+                return res.status(400).json({ error: "Keine Artikel übergeben" });
+            }
 
-            const summaryPromises = [];
             const successfulSummaries = [];
             const failedArticles = [];
             const SUMMARY_TARGET = 3;
+            let articlesProcessed = 0;
 
-            (async () => {
-                for (const article of articles) {
-                    if (successfulSummaries.length >= SUMMARY_TARGET) continue;
-                    try {
-                        const summary = await cluster.execute({ article, length });
-                        if (successfulSummaries.length < SUMMARY_TARGET) {
+            const resolveAndRespond = () => {
+                // Ensure we only send a response once
+                if (res.headersSent) {
+                    return;
+                }
+
+                const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
+                console.log(`Responding with ${finalSummaries.length} summaries.`);
+
+                if (finalSummaries.length === 0 && failedArticles.length > 0 && failedArticles.length === articles.length) {
+                    res.status(500).json({
+                        error: "Konnte keine Artikel zusammenfassen.",
+                        details: failedArticles,
+                    });
+                } else {
+                    // Sort summaries to match original article order for consistency
+                    const originalOrder = articles.map(a => a.link);
+                    finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
+                    res.json(finalSummaries);
+                }
+            };
+
+            // If there are no articles, respond immediately.
+            if (articles.length === 0) {
+                return resolveAndRespond();
+            }
+
+            for (const article of articles) {
+                cluster.execute({ article, length })
+                    .then(summary => {
+                        if (summary && successfulSummaries.length < SUMMARY_TARGET) {
                             successfulSummaries.push(summary);
                         }
-                    } catch (err) {
+                        // If we hit the target, respond immediately
+                        if (successfulSummaries.length >= SUMMARY_TARGET) {
+                            resolveAndRespond();
+                        }
+                    })
+                    .catch(err => {
                         console.error(`Error processing article ${article.link} in cluster: ${err.message}`);
                         failedArticles.push({ link: article.link, error: err.message });
-                    }
-                }
-            })();
-            
-            // This is tricky. We need to wait until we have enough summaries or all tasks are done.
-            // A better approach is to handle results as they come in.
-            
-            const results = [];
-            for (const article of articles) {
-                 results.push(cluster.execute({ article, length }));
+                    })
+                    .finally(() => {
+                        articlesProcessed++;
+                        // If all articles are processed (successfully or not), make sure we respond
+                        if (articlesProcessed === articles.length) {
+                            resolveAndRespond();
+                        }
+                    });
             }
-
-            const settledResults = await Promise.allSettled(results);
-
-            settledResults.forEach((result, index) => {
-                if (result.status === 'fulfilled' && result.value) {
-                    if (successfulSummaries.length < SUMMARY_TARGET) {
-                        successfulSummaries.push(result.value);
-                    }
-                } else if (result.status === 'rejected') {
-                    console.error(`Error processing article ${articles[index].link} in cluster: ${result.reason.message}`);
-                    failedArticles.push({ link: articles[index].link, error: result.reason.message });
-                }
-            });
-
-
-            const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
-            console.log(`Erfolgreich ${finalSummaries.length} Zusammenfassungen erstellt.`);
-            
-            if (finalSummaries.length === 0 && failedArticles.length > 0) {
-                return res.status(500).json({ error: "Konnte keine Artikel zusammenfassen.", details: failedArticles });
-            }
-
-            const originalOrder = articles.map(a => a.link);
-            finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
-
-            res.json(finalSummaries);
-
         } catch (err) {
             console.error(err);
-            res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
+            if (!res.headersSent) {
+                res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
+            }
         }
     });
 
