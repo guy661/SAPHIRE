@@ -4,6 +4,7 @@
 // --- Puppeteer Cluster Task Definitions ---
 
 
+
 async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) {
     try {
         // Use a simple goto without resource blocking for speed, as we only need the final URL
@@ -179,7 +180,7 @@ async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) 
     );
 
     return newSummary;
-}
+
 
 
 async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) {
