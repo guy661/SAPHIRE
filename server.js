@@ -144,7 +144,7 @@ async function main() {
     console.log('[Server] ✅ Puppeteer cluster launched successfully.');
 
     // Task to process a single article
-    await cluster.task(async ({ page, data: { article, length } }) => {
+    cluster.task(async ({ page, data: { article, length } }) => {
         const link = article.link;
 
         // 1. Check cache first
@@ -274,7 +274,7 @@ async function main() {
     });
 
     // New task for resolving Google News redirects
-    await cluster.task('resolveGoogleNewsRedirect', async ({ page, data: { googleNewsUrl } }) => {
+    cluster.task('resolveGoogleNewsRedirect', async ({ page, data: { googleNewsUrl } }) => {
         try {
             // Use a simple goto without resource blocking for speed, as we only need the final URL
             await page.goto(googleNewsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }); // 30 seconds timeout
