@@ -154,89 +154,59 @@ async function main() {
         let articleText;
         let finalUrl = link;
 
-        // 2. Fast Path Attempt (Lightweight Fetch)
+        // 2. Puppeteer Path (Primary Method)
+        console.log(`[Puppeteer] Processing ${link}`);
         try {
-            console.log(`[Fast Path] Attempting lightweight fetch for ${link}`);
-            const response = await fetch(link, {
-                headers: {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
-                },
-                timeout: 15000 // 15 second timeout for fast path
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+                const resourceType = req.resourceType();
+                if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' || resourceType === 'media') {
+                    req.abort();
+                } else {
+                    req.continue();
+                }
             });
 
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            
-            finalUrl = response.url;
-            const html = await response.text();
-            const doc = new JSDOM(html, { url: finalUrl });
+            await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 40000 });
+
+            // Aggressive consent button clicking
+            try {
+                await page.evaluate(() => {
+                    const selectors = [
+                        'button[id*="consent"]', 'button[class*="consent"]', 'button[id*="accept"]', 'button[class*="accept"]',
+                        'button[aria-label*="consent"]', 'button[aria-label*="accept"]', 'button:has-text("Accept all")',
+                        'button:has-text("Zustimmen")'
+                    ];
+                    const consentButton = document.querySelector(selectors.join(', '));
+                    if (consentButton) consentButton.click();
+                });
+                await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
+            } catch (e) { /* ignore */ }
+
+            if (await detectPaywall(page)) {
+                throw new Error("Paywall detected.");
+            }
+
+            finalUrl = page.url();
+            const bodyHtml = await page.content();
+            const doc = new JSDOM(bodyHtml, { url: finalUrl });
             const reader = new Readability(doc.window.document);
             const readableArticle = reader.parse();
-
-            if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
-                console.log(`[Fast Path] ✅ Success for ${link}`);
-                articleText = readableArticle.textContent;
-            } else {
-                throw new Error('Lightweight extraction failed to get enough content.');
-            }
-        } catch (fastPathError) {
-            // 3. Puppeteer Path (as fallback)
-            console.log(`[Fast Path] ❌ Failed: ${fastPathError.message}. Falling back to Puppeteer for ${link}`);
-            fs.appendFileSync('failed_urls.log', link + '\n');
             
-            try {
-                await page.setRequestInterception(true);
-                page.on('request', (req) => {
-                    const resourceType = req.resourceType();
-                    if (resourceType === 'image' || resourceType === 'stylesheet' || resourceType === 'font' || resourceType === 'media') {
-                        req.abort();
-                    } else {
-                        req.continue();
-                    }
+            if (!readableArticle || !readableArticle.textContent || readableArticle.textContent.length < 100) {
+                 // If Readability fails, grab all paragraph text as a last resort
+                articleText = await page.evaluate(() => {
+                    return Array.from(document.querySelectorAll('p')).map(p => p.textContent).join('\n');
                 });
-
-                await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 40000 });
-
-                // Aggressive consent button clicking
-                try {
-                    await page.evaluate(() => {
-                        const selectors = [
-                            'button[id*="consent"]', 'button[class*="consent"]', 'button[id*="accept"]', 'button[class*="accept"]',
-                            'button[aria-label*="consent"]', 'button[aria-label*="accept"]', 'button:has-text("Accept all")',
-                            'button:has-text("Zustimmen")'
-                        ];
-                        const consentButton = document.querySelector(selectors.join(', '));
-                        if (consentButton) consentButton.click();
-                    });
-                    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
-                } catch (e) { /* ignore */ }
-
-                if (await detectPaywall(page)) {
-                    throw new Error("Paywall detected.");
-                }
-
-                finalUrl = page.url();
-                const bodyHtml = await page.content();
-                const doc = new JSDOM(bodyHtml, { url: finalUrl });
-                const reader = new Readability(doc.window.document);
-                const readableArticle = reader.parse();
-                
-                if (!readableArticle || !readableArticle.textContent || readableArticle.textContent.length < 100) {
-                     // If Readability fails, grab all paragraph text as a last resort
-                    articleText = await page.evaluate(() => {
-                        return Array.from(document.querySelectorAll('p')).map(p => p.textContent).join('\n');
-                    });
-                } else {
-                    articleText = readableArticle.textContent;
-                }
-
-            } catch (puppeteerError) {
-                throw new Error(`Puppeteer failed for ${link}: ${puppeteerError.message}`);
+            } else {
+                articleText = readableArticle.textContent;
             }
+
+        } catch (puppeteerError) {
+            throw new Error(`Puppeteer failed for ${link}: ${puppeteerError.message}`);
         }
 
-        // 4. Final checks and summarization
+        // 3. Final checks and summarization
         if (finalUrl.endsWith('.pdf') || finalUrl.includes('youtube.com')) {
             throw new Error(`Skipping PDF/Video: ${finalUrl}`);
         }
@@ -247,7 +217,7 @@ async function main() {
         const summarizedText = await summarizeText(articleText, length);
         const newSummary = { title: article.title, summary: summarizedText, link: article.link, date: article.pubDate };
         
-        // 5. Save to DB
+        // 4. Save to DB
         db.run(
             `INSERT INTO articles (link, title, summary, date, open_count, cached_at) VALUES (?, ?, ?, ?, 1, datetime('now')) ON CONFLICT(link) DO UPDATE SET title=excluded.title, summary=excluded.summary, date=excluded.date, open_count=open_count+1, cached_at=datetime('now')`,
             [newSummary.link, newSummary.title, newSummary.summary, newSummary.date]
@@ -309,7 +279,7 @@ async function main() {
     });
 
     // ===== AI-Zusammenfassung =====
-    app.post("/summarize", (req, res) => {
+    app.post("/summarize", async (req, res) => {
         console.log("Summarize endpoint called");
         try {
             const { articles, length } = req.body;
@@ -320,58 +290,47 @@ async function main() {
             const successfulSummaries = [];
             const failedArticles = [];
             const SUMMARY_TARGET = 3;
-            let articlesProcessed = 0;
+            const BATCH_SIZE = 5; // Process 5 articles at a time
 
-            const resolveAndRespond = () => {
-                // Ensure we only send a response once
-                if (res.headersSent) {
-                    return;
+            for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+                if (successfulSummaries.length >= SUMMARY_TARGET) {
+                    break; // Stop processing if we already have enough summaries
                 }
 
-                const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
-                console.log(`Responding with ${finalSummaries.length} summaries.`);
+                const batch = articles.slice(i, i + BATCH_SIZE);
+                console.log(`Processing batch of ${batch.length} articles...`);
+                
+                const promises = batch.map(article => cluster.execute({ article, length }));
+                const results = await Promise.allSettled(promises);
 
-                if (finalSummaries.length === 0 && failedArticles.length > 0 && failedArticles.length === articles.length) {
-                    res.status(500).json({
-                        error: "Konnte keine Artikel zusammenfassen.",
-                        details: failedArticles,
-                    });
-                } else {
-                    // Sort summaries to match original article order for consistency
-                    const originalOrder = articles.map(a => a.link);
-                    finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
-                    res.json(finalSummaries);
-                }
-            };
-
-            // If there are no articles, respond immediately.
-            if (articles.length === 0) {
-                return resolveAndRespond();
+                results.forEach((result, index) => {
+                    if (result.status === 'fulfilled' && result.value) {
+                        if (successfulSummaries.length < SUMMARY_TARGET) {
+                            successfulSummaries.push(result.value);
+                        }
+                    } else if (result.status === 'rejected') {
+                        const failedLink = batch[index].link;
+                        console.error(`Error processing article ${failedLink} in cluster: ${result.reason.message}`);
+                        failedArticles.push({ link: failedLink, error: result.reason.message });
+                    }
+                });
             }
 
-            for (const article of articles) {
-                cluster.execute({ article, length })
-                    .then(summary => {
-                        if (summary && successfulSummaries.length < SUMMARY_TARGET) {
-                            successfulSummaries.push(summary);
-                        }
-                        // If we hit the target, respond immediately
-                        if (successfulSummaries.length >= SUMMARY_TARGET) {
-                            resolveAndRespond();
-                        }
-                    })
-                    .catch(err => {
-                        console.error(`Error processing article ${article.link} in cluster: ${err.message}`);
-                        failedArticles.push({ link: article.link, error: err.message });
-                    })
-                    .finally(() => {
-                        articlesProcessed++;
-                        // If all articles are processed (successfully or not), make sure we respond
-                        if (articlesProcessed === articles.length) {
-                            resolveAndRespond();
-                        }
-                    });
+            const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
+            console.log(`Responding with ${finalSummaries.length} summaries.`);
+
+            if (finalSummaries.length === 0 && failedArticles.length > 0) {
+                return res.status(500).json({
+                    error: "Konnte keine Artikel zusammenfassen.",
+                    details: failedArticles,
+                });
             }
+
+            // Sort summaries to match original article order for consistency
+            const originalOrder = articles.map(a => a.link);
+            finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
+            res.json(finalSummaries);
+
         } catch (err) {
             console.error(err);
             if (!res.headersSent) {
