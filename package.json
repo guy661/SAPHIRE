@@ -22,6 +22,8 @@
     "node-fetch": "^2.7.0",
     "puppeteer": "^24.30.0",
     "puppeteer-cluster": "^0.25.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "rss-parser": "^3.13.0",
     "sqlite3": "^5.1.7"
   },

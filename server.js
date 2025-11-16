@@ -7,7 +7,9 @@ const Parser = require("rss-parser");
 const fetch = require("node-fetch");
 const { Readability } = require("@mozilla/readability");
 const { JSDOM } = require("jsdom");
-const puppeteer = require("puppeteer");
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
 const fs = require("fs");
 const { Cluster } = require('puppeteer-cluster');
 
@@ -113,6 +115,7 @@ async function main() {
     const cluster = await Cluster.launch({
         concurrency: Cluster.CONCURRENCY_PAGE,
         maxConcurrency: 8, // Increased concurrency
+        puppeteer: puppeteer,
         puppeteerOptions: {
             headless: true,
             args: ['--no-sandbox', '--disable-setuid-sandbox']
