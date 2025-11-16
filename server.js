@@ -7,7 +7,7 @@ const { Readability } = require("@mozilla/readability");
 const { JSDOM } = require("jsdom");
 const puppeteer = require("puppeteer");
 const chromium = require('@sparticuz/chromium');
-const path = require('path'); 
+const path = require('path');
 const db = require('./database.js');
 
 require("dotenv").config();
@@ -97,6 +97,7 @@ async function detectPaywall(page) {
  * Uses Puppeteer to get a page's HTML, then aggressively cleans junk elements
  * before passing the result to Readability.
  * @param {string} url The initial URL to visit.
+ * @param {object} browser The persistent browser instance.
  * @returns {Promise<{finalUrl: string, cleanHtml: string}>} The final URL and the cleaned HTML of the page body.
  */
 async function getPageContentWithPuppeteer(url, browser) {
@@ -108,7 +109,7 @@ async function getPageContentWithPuppeteer(url, browser) {
             console.log(`[Puppeteer] Creating new page in existing browser for ${url}`);
             page = await browser.newPage();
             console.log(`[Puppeteer] Neue Seite erstellt.`);
-            
+
             await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36');
             await page.setViewport({ width: 1280, height: 800 });
             console.log(`[Puppeteer] User Agent und Viewport gesetzt.`);
@@ -116,7 +117,7 @@ async function getPageContentWithPuppeteer(url, browser) {
             console.log(`[Puppeteer] Navigiere zu ${url}...`);
             await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
             console.log(`[Puppeteer] Navigation abgeschlossen.`);
-            
+
             try {
                 console.log(`[Puppeteer] Suche nach Google-Zustimmungs-Button...`);
                 await page.waitForSelector('form button', { timeout: 5000 });
@@ -238,7 +239,7 @@ async function summarizeSingleArticle(article, length = 'medium', browser) {
                 if (!articleText || articleText.length < 250) {
                     throw new Error(`Überspringe Artikel (zu wenig Inhalt): ${finalUrl}`);
                 }
-                
+
                 const text = articleText.trim();
                 const chunks = chunkText(text);
                 let summarizedText;
@@ -298,11 +299,45 @@ async function summarizeSingleArticle(article, length = 'medium', browser) {
     });
 }
 
-function main() {
+// This will hold our single, persistent browser instance
+let browser;
+
+async function main() {
     if (!process.env.GEMINI_API_KEY) {
         console.error("Fehler: GEMINI_API_KEY ist nicht in der .env-Datei gesetzt.");
         process.exit(1);
     }
+
+    // --- Launch persistent browser ---
+    console.log('[Server] Initializing persistent browser instance...');
+    try {
+        const executablePath = await chromium.executablePath();
+        browser = await puppeteer.launch({
+            args: [...chromium.args, '--disable-dev-shm-usage', '--no-sandbox'],
+            defaultViewport: chromium.defaultViewport,
+            executablePath: executablePath,
+            headless: chromium.headless,
+            ignoreHTTPSErrors: true
+        });
+        console.log('[Server] ✅ Persistent browser instance launched successfully.');
+        
+        // Gracefully close browser on application shutdown
+        const cleanup = async () => {
+            if (browser) {
+                console.log('[Server] Closing persistent browser instance.');
+                await browser.close();
+                browser = null;
+            }
+            process.exit(0);
+        };
+        process.on('SIGINT', cleanup);
+        process.on('SIGTERM', cleanup);
+
+    } catch (e) {
+        console.error('[Server] ‼️ Failed to launch persistent browser instance:', e);
+        process.exit(1);
+    }
+
 
     const app = express();
     app.use(cors());
@@ -312,56 +347,51 @@ function main() {
 
     // ===== RSS-Route =====
     app.get("/rss", async (req, res) => {
-      try {
-        const keyword = req.query.keyword?.trim();
-        if (!keyword) return res.status(400).json({ error: "Keine Suche angegeben" });
-        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=de&gl=DE&ceid=DE:de`;
-        const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
-        if (!response.ok) throw new Error("RSS Feed konnte nicht geladen werden");
-        const xml = await response.text();
-        const feed = await parser.parseString(xml);
-        if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
-        res.json(feed.items.slice(0, 10));
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message || "Fehler beim Abrufen des RSS-Feeds" });
-      }
+        try {
+            const keyword = req.query.keyword?.trim();
+            if (!keyword) return res.status(400).json({ error: "Keine Suche angegeben" });
+            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(keyword)}&hl=de&gl=DE&ceid=DE:de`;
+            const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+            if (!response.ok) throw new Error("RSS Feed konnte nicht geladen werden");
+            const xml = await response.text();
+            const feed = await parser.parseString(xml);
+            if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
+            res.json(feed.items.slice(0, 10));
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ error: err.message || "Fehler beim Abrufen des RSS-Feeds" });
+        }
     });
 
     // ===== AI-Zusammenfassung =====
     app.post("/summarize", async (req, res) => {
-      console.log("Summarize endpoint called");
-      try {
-        const { articles, length } = req.body;
-        if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
+        console.log("Summarize endpoint called");
+        if (!browser) {
+            console.error("[Server] Summarize called but browser is not initialized.");
+            return res.status(503).json({ error: "Browser service is not ready, please try again shortly." });
+        }
 
-        const CONCURRENCY_LIMIT = parseInt(process.env.PUPPETEER_CONCURRENCY, 10) || 2;
-        console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT}. You can adjust this with the PUPPETEER_CONCURRENCY environment variable.`);
-        const articlesToProcess = [...articles];
-        const successfulSummaries = [];
-        const failedArticles = [];
+        try {
+            const { articles, length } = req.body;
+            if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
-        // Fetch executable path once to prevent race conditions
-        const executablePath = await chromium.executablePath();
-        console.log(`[Server] Chromium executable path: ${executablePath}`);
+            const CONCURRENCY_LIMIT = parseInt(process.env.PUPPETEER_CONCURRENCY, 10) || 2;
+            console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT} pages.`);
+            const articlesToProcess = [...articles];
+            const successfulSummaries = [];
+            const failedArticles = [];
+            const SUMMARY_TARGET = 3;
 
-        async function worker() {
-            const browser = await puppeteer.launch({
-                args: [...chromium.args, '--disable-dev-shm-usage'],
-                defaultViewport: chromium.defaultViewport,
-                executablePath: executablePath, // Use pre-fetched path
-                headless: chromium.headless,
-                ignoreHTTPSErrors: true
-            });
-            console.log(`[Worker] Browser instance launched.`);
-
-            try {
-                while (articlesToProcess.length > 0) {
+            // This worker function now uses the single, persistent browser instance
+            async function worker() {
+                while (articlesToProcess.length > 0 && successfulSummaries.length < SUMMARY_TARGET) {
                     const article = articlesToProcess.shift();
                     if (article) {
                         try {
                             const summary = await summarizeSingleArticle(article, length, browser);
-                            successfulSummaries.push(summary);
+                            if (successfulSummaries.length < SUMMARY_TARGET) {
+                                successfulSummaries.push(summary);
+                            }
                         } catch (error) {
                             console.error(`Failed to process article ${article.link}:`, error.message);
                             failedArticles.push({
@@ -371,43 +401,41 @@ function main() {
                         }
                     }
                 }
-            } finally {
-                await browser.close();
-                console.log(`[Worker] Browser instance closed.`);
             }
+
+            const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
+            await Promise.all(workers);
+
+            const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
+
+            console.log(`Erfolgreich ${finalSummaries.length} Zusammenfassungen erstellt.`);
+
+            if (finalSummaries.length === 0 && failedArticles.length > 0) {
+                return res.status(500).json({
+                    error: "Konnte keine Artikel zusammenfassen.",
+                    details: failedArticles
+                });
+            }
+
+            // Sort summaries to match original article order for consistency
+            const originalOrder = articles.map(a => a.link);
+            finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
+
+            res.json(finalSummaries);
+
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
         }
-
-        const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
-        await Promise.all(workers);
-
-        console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
-
-        if (successfulSummaries.length === 0 && failedArticles.length > 0) {
-            return res.status(500).json({ 
-                error: "Konnte keine Artikel zusammenfassen.",
-                details: failedArticles 
-            });
-        }
-
-        // Sort summaries to match original article order for consistency
-        const originalOrder = articles.map(a => a.link);
-        successfulSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
-
-        res.json(successfulSummaries);
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
-      }
     });
 
     // ===== statische Dateien =====
-app.use(express.static(path.join(__dirname, 'public')));
+    app.use(express.static(path.join(__dirname, 'public')));
 
     app.get('/', (req, res) => {
-  res.set('Cache-Control', 'no-store'); // optional
-  res.sendFile(path.join(__dirname, 'public', 'AI-Projekt.html'));
-});
+        res.set('Cache-Control', 'no-store'); // optional
+        res.sendFile(path.join(__dirname, 'public', 'AI-Projekt.html'));
+    });
 
     const PORT = process.env.PORT || 3000;
     app.listen(PORT, () => console.log(`✅ Server läuft auf http://localhost:${PORT}`));
