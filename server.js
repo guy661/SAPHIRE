@@ -28,6 +28,7 @@ async function resolveGoogleNewsRedirectTask({ page, data: { googleNewsUrl } }) 
  * @returns {Promise<{finalUrl: string, cleanHtml: string}>} The final URL and the cleaned HTML of the page body.
  */
 async function main() {
+    console.log("main function started");
     if (!process.env.GEMINI_API_KEY) {
         console.error("Fehler: GEMINI_API_KEY ist nicht in der .env-Datei gesetzt.");
         process.exit(1);
@@ -223,6 +224,7 @@ async function main() {
         },
         timeout: 180000 // 3 minutes timeout for a task
     });
+    console.log("Cluster launched or launching...");
 
     console.log('[Server] ✅ Puppeteer cluster launched successfully.');
 
@@ -339,7 +341,11 @@ async function main() {
 
     const PORT = process.env.PORT || 3001;
     console.log(`[Server] Attempting to listen on port: ${PORT}`);
-    app.listen(PORT, () => console.log(`✅ Server läuft auf http://localhost:${PORT}`));
+    console.log("Express app configured, starting server...");
+    app.listen(PORT, () => {
+        console.log(`✅ Server läuft auf http://localhost:${PORT}`);
+        console.log("Server is now listening for requests.");
+    });
 
     const cleanup = async () => {
         console.log('[Server] Closing cluster...');
