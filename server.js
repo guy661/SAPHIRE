@@ -100,26 +100,47 @@ async function detectPaywall(page) {
     return false;
 }
 
-// --- Global Helper for Gemini API ---
-async function callGemini(prompt) {
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const response = await fetch(geminiApiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
-    }
-    const data = await response.json();
-    // Add optional chaining to prevent errors if the response structure is unexpected
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-}
-
-async function summarizeArticleTask({ page, data: { article, length } }) {
+async function detectPaywall(page) {
     const link = article.link;
     console.log('summarizeArticleTask started for link:', link);
+
+    // --- Inlined callGemini function ---
+    async function callGeminiInlined(prompt) {
+        const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+        const response = await fetch(geminiApiUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
+        }
+        const data = await response.json();
+        return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    }
+
+    // --- Inlined summarizeText function ---
+    async function summarizeTextInlined(text, length) {
+        // chunkText is a global helper, so it should be available.
+        const chunks = chunkText(text.trim());
+        const lengthPrompts = {
+            short: "Kurze Zusammenfassung (2-3 Sätze):",
+            medium: "Zusammenfassung (Überblick + 3-4 Stichpunkte):",
+            long: "Detaillierte Zusammenfassung (Überblick + 5-6 Stichpunkte mit Erklärungen):"
+        };
+        const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
+
+        if (chunks.length > 1) {
+            const chunkSummaryPromises = chunks.map(chunk => callGeminiInlined(`Fasse diesen Textabschnitt zusammen:\n\n${chunk}`));
+            const chunkSummaries = await Promise.all(chunkSummaryPromises);
+            const combinationPrompt = `Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.\n${basePrompt}\nZusammenfassungen:\n${chunkSummaries.join("\n---\n")}`;
+            return callGeminiInlined(combinationPrompt);
+        } else {
+            const prompt = `${basePrompt}\nArtikel:\n${chunks[0]}`;
+            return callGeminiInlined(prompt);
+        }
+    }
 
     // 1. Check cache first
     const cachedArticle = await new Promise((resolve, reject) => {
@@ -235,7 +256,7 @@ async function summarizeArticleTask({ page, data: { article, length } }) {
         throw new Error(`Not enough content to summarize: ${finalUrl}`);
     }
 
-    const summarizedText = await summarizeText(articleText, length);
+    const summarizedText = await summarizeTextInlined(articleText, length); // Call inlined version
     const newSummary = { title: article.title, summary: summarizedText, link: article.link, date: article.pubDate };
     
     // 5. Save to DB
@@ -290,27 +311,6 @@ async function main() {
     // New task for resolving Google News redirects
     cluster.task('resolveGoogleNewsRedirect', resolveGoogleNewsRedirectTask);
 
-
-    // Helper function for summarization logic, moved inside main to close over chunkText and callGemini
-    async function summarizeText(text, length) {
-        const chunks = chunkText(text.trim());
-        const lengthPrompts = {
-            short: "Kurze Zusammenfassung (2-3 Sätze):",
-            medium: "Zusammenfassung (Überblick + 3-4 Stichpunkte):",
-            long: "Detaillierte Zusammenfassung (Überblick + 5-6 Stichpunkte mit Erklärungen):"
-        };
-        const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
-
-        if (chunks.length > 1) {
-            const chunkSummaryPromises = chunks.map(chunk => callGemini(`Fasse diesen Textabschnitt zusammen:\n\n${chunk}`));
-            const chunkSummaries = await Promise.all(chunkSummaryPromises);
-            const combinationPrompt = `Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.\n${basePrompt}\nZusammenfassungen:\n${chunkSummaries.join("\n---\n")}`;
-            return callGemini(combinationPrompt);
-        } else {
-            const prompt = `${basePrompt}\nArtikel:\n${chunks[0]}`;
-            return callGemini(prompt);
-        }
-    }
 
     const app = express();
     app.use(cors());
