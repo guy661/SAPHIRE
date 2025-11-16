@@ -344,5 +344,5 @@ async function main() {
     process.on('SIGTERM', cleanup);
 }
 
-(async () => await main())();
+main().catch(err => { console.error("Unhandled error in main:", err); process.exit(1); });
 
