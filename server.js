@@ -265,11 +265,11 @@ async function summarizeSingleArticle(article, length = 'medium') {
 
                 if (chunks.length > 1) {
                     console.log(`📝 Artikel wird in ${chunks.length} Teile für ${article.link} aufgeteilt`);
-                    const chunkSummaries = [];
-                    for (const chunk of chunks) {
+                    const chunkSummaryPromises = chunks.map(chunk => {
                         const prompt = `Zusammenfassung des Abschnitts:\n\n${chunk}`;
-                        chunkSummaries.push(await callGemini(prompt));
-                    }
+                        return callGemini(prompt);
+                    });
+                    const chunkSummaries = await Promise.all(chunkSummaryPromises);
                     const combinationPrompt = `
                         Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.
                         ${basePrompt}
@@ -342,71 +342,56 @@ function main() {
 
     // ===== AI-Zusammenfassung =====
     app.post("/summarize", async (req, res) => {
-      console.log("Summarize endpoint called");
-      try {
-        const { articles, length } = req.body;
-        if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
+        console.log("Summarize endpoint called");
+        try {
+            const { articles, length } = req.body;
+            if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
-        const CONCURRENCY_LIMIT = 3; // Limit concurrent Puppeteer instances
-        const successfulSummaries = [];
-        const failedArticles = [];
-        let activePromises = 0;
-        let articleIndex = 0;
+            const CONCURRENCY_LIMIT = 5; // Increased concurrency
+            const articlesToProcess = [...articles];
+            const successfulSummaries = [];
+            const failedArticles = [];
 
-        const processNextArticle = async () => {
-            if (articleIndex >= articles.length) {
-                return; // No more articles to process
-            }
-
-            const currentArticle = articles[articleIndex++];
-            activePromises++;
-
-            try {
-                const summary = await summarizeSingleArticle(currentArticle, length);
-                successfulSummaries.push(summary);
-            } catch (error) {
-                console.error(`Failed to process article ${currentArticle.link}:`, error.message);
-                failedArticles.push({
-                    link: currentArticle.link,
-                    error: error.message,
-                });
-            } finally {
-                activePromises--;
-                // If there are more articles and we haven't reached the desired number of summaries,
-                // or if we still have active promises, continue processing.
-                if (articleIndex < articles.length && successfulSummaries.length < CONCURRENCY_LIMIT) {
-                    await processNextArticle();
+            async function worker() {
+                while (articlesToProcess.length > 0) {
+                    const article = articlesToProcess.shift();
+                    if (article) {
+                        try {
+                            const summary = await summarizeSingleArticle(article, length);
+                            successfulSummaries.push(summary);
+                        } catch (error) {
+                            console.error(`Failed to process article ${article.link}:`, error.message);
+                            failedArticles.push({
+                                link: article.link,
+                                error: error.message,
+                            });
+                        }
+                    }
                 }
             }
-        };
 
-        // Start initial concurrent processes
-        const initialPromises = [];
-        for (let i = 0; i < CONCURRENCY_LIMIT && i < articles.length; i++) {
-            initialPromises.push(processNextArticle());
+            const workers = Array(CONCURRENCY_LIMIT).fill(null).map(() => worker());
+            await Promise.all(workers);
+
+            console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
+
+            if (successfulSummaries.length === 0 && failedArticles.length > 0) {
+                return res.status(500).json({
+                    error: "Konnte keine Artikel zusammenfassen.",
+                    details: failedArticles
+                });
+            }
+
+            // Sort summaries to match original article order for consistency
+            const originalOrder = articles.map(a => a.link);
+            successfulSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
+
+            res.json(successfulSummaries);
+
+        } catch (err) {
+            console.error(err);
+            res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
         }
-        await Promise.allSettled(initialPromises);
-
-        // Wait for any remaining active promises to complete if they were started
-        while (activePromises > 0) {
-            await new Promise(resolve => setTimeout(resolve, 100)); // Small delay to prevent busy-waiting
-        }
-
-        console.log(`Erfolgreich ${successfulSummaries.length} von ${articles.length} Zusammenfassungen erstellt.`);
-        
-        if (successfulSummaries.length === 0 && failedArticles.length > 0) {
-            return res.status(500).json({ 
-                error: "Konnte keine Artikel zusammenfassen.",
-                details: failedArticles 
-            });
-        }
-
-        res.json(successfulSummaries);
-
-      } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message || "Fehler bei AI-Zusammenfassung" });
-      }
     });
 
     // ===== statische Dateien =====
