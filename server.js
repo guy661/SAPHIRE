@@ -35,6 +35,22 @@ function chunkText(text, chunkSize = 8000) {
     return chunks;
 }
 
+async function resolveRedirect(url) {
+    try {
+        const response = await fetch(url, {
+            redirect: 'follow',
+            timeout: 15000, // 15-second timeout
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
+            }
+        });
+        return response.url;
+    } catch (error) {
+        console.error(`Redirect resolution failed for ${url}: ${error.message}`);
+        return url; // Fallback to the original URL on error
+    }
+}
+
 async function detectPaywall(page) {
     // 1. JSON-LD Check
     try {
@@ -312,11 +328,14 @@ async function main() {
             const feed = await parser.parseString(xml);
             if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
 
-            const cleanedItems = feed.items.map(item => {
-                const content = item.content || item.contentSnippet || '';
-                const urlMatch = content.match(/<a href="([^"]*)"/);
-                return { ...item, link: urlMatch ? urlMatch[1] : item.link };
-            }).slice(0, 10);
+            console.log("Resolving redirects for RSS feed items...");
+            const cleanedItems = await Promise.all(
+                feed.items.slice(0, 10).map(async (item) => {
+                    const resolvedLink = await resolveRedirect(item.link);
+                    return { ...item, link: resolvedLink };
+                })
+            );
+            console.log("All RSS feed item redirects resolved.");
 
             res.json(cleanedItems);
         } catch (err) {
