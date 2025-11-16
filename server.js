@@ -35,22 +35,6 @@ function chunkText(text, chunkSize = 8000) {
     return chunks;
 }
 
-async function resolveRedirect(url) {
-    try {
-        const response = await fetch(url, {
-            redirect: 'follow',
-            timeout: 15000, // 15-second timeout
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36'
-            }
-        });
-        return response.url;
-    } catch (error) {
-        console.error(`Redirect resolution failed for ${url}: ${error.message}`);
-        return url; // Fallback to the original URL on error
-    }
-}
-
 async function detectPaywall(page) {
     // 1. JSON-LD Check
     try {
@@ -289,6 +273,18 @@ async function main() {
         return newSummary;
     });
 
+    // New task for resolving Google News redirects
+    await cluster.task('resolveGoogleNewsRedirect', async ({ page, data: { googleNewsUrl } }) => {
+        try {
+            // Use a simple goto without resource blocking for speed, as we only need the final URL
+            await page.goto(googleNewsUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }); // 30 seconds timeout
+            return page.url(); // Return the final URL after redirects
+        } catch (error) {
+            console.error(`[Puppeteer Redirect Resolver] Failed to resolve ${googleNewsUrl}: ${error.message}`);
+            return googleNewsUrl; // Fallback to original URL on error
+        }
+    });
+
     // Helper function for summarization logic, moved inside main to close over chunkText and callGemini
     async function summarizeText(text, length) {
         const chunks = chunkText(text.trim());
@@ -328,14 +324,14 @@ async function main() {
             const feed = await parser.parseString(xml);
             if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
 
-            console.log("Resolving redirects for RSS feed items...");
+            console.log("Resolving redirects for RSS feed items with Puppeteer...");
             const cleanedItems = await Promise.all(
                 feed.items.slice(0, 10).map(async (item) => {
-                    const resolvedLink = await resolveRedirect(item.link);
+                    const resolvedLink = await cluster.execute('resolveGoogleNewsRedirect', { googleNewsUrl: item.link });
                     return { ...item, link: resolvedLink };
                 })
             );
-            console.log("All RSS feed item redirects resolved.");
+            console.log("All RSS feed item redirects resolved with Puppeteer.");
 
             res.json(cleanedItems);
         } catch (err) {
