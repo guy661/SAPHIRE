@@ -431,7 +431,7 @@ async function main() {
             const { articles, length } = req.body;
             if (!articles?.length) return res.status(400).json({ error: "Keine Artikel übergeben" });
 
-            const CONCURRENCY_LIMIT = 3;
+            const CONCURRENCY_LIMIT = 5;
             console.log(`[Server] Using concurrency limit of ${CONCURRENCY_LIMIT} pages.`);
             const articlesToProcess = [...articles];
             const successfulSummaries = [];
