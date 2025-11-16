@@ -1,3 +1,102 @@
+console.log('--- RUNNING SERVER.JS VERSION 2 ---');
+
+const express = require("express");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const Parser = require("rss-parser");
+const fetch = require("node-fetch");
+const { Readability } = require("@mozilla/readability");
+const { JSDOM } = require("jsdom");
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+const fs = require("fs");
+const { Cluster } = require('puppeteer-cluster');
+
+
+const path = require('path');
+const db = require('./database.js');
+
+require("dotenv").config();
+
+// --- Helper Functions ---
+
+/**
+ * Splits a long text into smaller chunks of a specified size.
+ * @param {string} text The text to split.
+ * @param {number} chunkSize The approximate size of each chunk in characters.
+ * @returns {string[]} An array of text chunks.
+ */
+function chunkText(text, chunkSize = 8000) {
+    const chunks = [];
+    for (let i = 0; i < text.length; i += chunkSize) {
+        chunks.push(text.substring(i, i + chunkSize));
+    }
+    return chunks;
+}
+
+async function detectPaywall(page) {
+    // 1. JSON-LD Check
+    try {
+        const jsonLd = await page.evaluate(() => {
+            const script = document.querySelector('script[type="application/ld+json"]');
+            if (script) {
+                return JSON.parse(script.innerText);
+            }
+            return null;
+        });
+
+        if (jsonLd) {
+            if (Array.isArray(jsonLd)) {
+                for (const item of jsonLd) {
+                    if (item.isAccessibleForFree === "False" || item.isAccessibleForFree === false) {
+                        console.log('Paywall detected by JSON-LD: isAccessibleForFree is false.');
+                        return true;
+                    }
+                }
+            } else if (jsonLd.isAccessibleForFree === "False" || jsonLd.isAccessibleForFree === false) {
+                console.log('Paywall detected by JSON-LD: isAccessibleForFree is false.');
+                return true;
+            }
+        }
+    } catch (e) {
+        console.log("Could not parse JSON-LD, continuing with other checks.");
+    }
+
+    // 2. Selector-based detection
+    const paywallSelectors = [
+        '.paywall', '.g-overlay', 'div[id*="paywall"]', 'div[class*="paywall"]',
+        '.modal-dialog.paywall-modal', '.tp-modal', '.ob-paywall',
+        // Add more selectors for common paywall providers
+        '[id*="pigeon-"]', '[class*="pigeon-"]', // Pigeon
+        '[id*="zephr-"]', '[class*="zephr-"]', // Zephr
+        '[class*="piano-"]', // Piano
+    ];
+
+    for (const selector of paywallSelectors) {
+        const element = await page.$(selector);
+        if (element) {
+            console.log(`Paywall detected by selector: ${selector}`);
+            return true;
+        }
+    }
+
+    // 3. Keyword-based detection
+    const pageText = await page.evaluate(() => document.body.innerText);
+    const paywallKeywords = [
+        'subscribe to read more', 'full access', 'premium content', 'subscriber-only',
+        'unlock article', 'register to continue', 'you have reached your limit',
+        'become a member', 'log in to read', 'create an account to continue',
+        'continue reading with a subscription'
+    ];
+
+    for (const keyword of paywallKeywords) {
+        if (pageText.toLowerCase().includes(keyword)) {
+            console.log(`Paywall detected by keyword: "${keyword}"`);
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -35,9 +134,14 @@ async function summarizeArticleTask({ page, data: { article, length } }) {
         const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
 
         if (chunks.length > 1) {
-            const chunkSummaryPromises = chunks.map(chunk => callGeminiInlined(`Fasse diesen Textabschnitt zusammen:\n\n${chunk}`));
+            const chunkSummaryPromises = chunks.map(chunk => callGeminiInlined(`Fasse diesen Textabschnitt zusammen:
+
+${chunk}`));
             const chunkSummaries = await Promise.all(chunkSummaryPromises);
-            const combinationPrompt = `Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.\n${basePrompt}\nZusammenfassungen:\n${chunkSummaries.join("\n---\n")}`;
+            const combinationPrompt = `Kombinieren Sie diese Zusammenfassungen zu einer Gesamtzusammenfassung im '${length}' Stil.
+${basePrompt}
+Zusammenfassungen:
+${chunkSummaries.join("\n---\n")}`;
             return callGeminiInlined(combinationPrompt);
         } else {
             const prompt = `${basePrompt}\nArtikel:\n${chunks[0]}`;
@@ -332,4 +436,3 @@ async function main() {
 }
 
 main();
-
