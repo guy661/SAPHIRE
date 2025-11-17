@@ -13,6 +13,19 @@ const { summarizeArticleTask } = require('./task.js');
 
 puppeteer.use(StealthPlugin());
 
+async function retry(fn, retries = 3, delay = 1000) {
+    try {
+        return await fn();
+    } catch (err) {
+        if (retries > 0) {
+            console.log(`Retrying... attempts left: ${retries}`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return retry(fn, retries - 1, delay * 2);
+        }
+        throw err;
+    }
+}
+
 async function main() {
     console.log("main function started");
     if (!process.env.GEMINI_API_KEY) {
@@ -42,31 +55,43 @@ async function main() {
     const parser = new Parser();
 
     async function extractRealUrl(googleRssUrl) {
-        try {
-            const response = await axios.get(googleRssUrl);
-            const $ = cheerio.load(response.data);
-            const data = $('c-wiz[data-p]').attr('data-p');
-            const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
+        return retry(async () => {
+            try {
+                const response = await axios.get(googleRssUrl, { timeout: 15000 });
+                const $ = cheerio.load(response.data);
+                const data = $('c-wiz[data-p]').attr('data-p');
+                if (!data) {
+                    // If data-p is not found, it might be a direct link already.
+                    return googleRssUrl;
+                }
+                const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
 
-            const payload = {
-              'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
-            };
+                const payload = {
+                  'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
+                };
 
-            const headers = {
-              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-            };
+                const headers = {
+                  'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+                };
 
-            
-            const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers });
-            const arrayString = JSON.parse(postResponse.data.replace(")]}'", ""))[0][2];
-            const articleUrl = JSON.parse(arrayString)[1];
+                const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', new URLSearchParams(payload).toString(), { headers, timeout: 15000 });
+                const arrayString = JSON.parse(postResponse.data.replace(")]}'", ""))[0][2];
+                const articleUrl = JSON.parse(arrayString)[1];
 
-            return articleUrl;
-        } catch (e) {
-            console.error("Error extracting real URL:", e);
-            return googleRssUrl;
-        }
+                return articleUrl;
+            } catch (e) {
+                console.error("Error extracting real URL, will retry:", e.message);
+                // Also check for specific axios error properties if available
+                if (e.response) {
+                    console.error(`Status: ${e.response.status}, Data: ${e.response.data.slice(0, 100)}...`);
+                }
+                throw e; // Throw error to trigger retry
+            }
+        }).catch(err => {
+            console.error("Failed to extract real URL after multiple retries:", err.message);
+            return googleRssUrl; // Fallback to original URL after all retries fail
+        });
     }
 
     app.get("/rss", async (req, res) => {
@@ -116,28 +141,29 @@ async function main() {
                 const batch = articles.slice(i, i + BATCH_SIZE);
                 console.log(`Processing batch of ${batch.length} articles...`);
                 
-                const promises = batch.map(article => {
+                const batchPromises = [];
+                for (const article of batch) {
                     console.log('Executing cluster task for article:', article.link);
-                    return cluster.execute({ article, length });
-                });
-                const results = await Promise.allSettled(promises);
-
-                results.forEach((result, index) => {
-                    if (result.status === 'fulfilled' && result.value) {
-                        if (successfulSummaries.length < SUMMARY_TARGET) {
-                            successfulSummaries.push(result.value);
-                        }
-                    } else if (result.status === 'rejected') {
-                        const failedLink = batch[index].link;
-                        console.error(`Error processing article ${failedLink} in cluster: ${result.reason.message}`);
-                        failedArticles.push({ link: failedLink, error: result.reason.message });
+                    const promise = cluster.execute({ article, length })
+                        .then(summary => {
+                            if (successfulSummaries.length < SUMMARY_TARGET) {
+                                successfulSummaries.push(summary);
+                            }
+                        })
+                        .catch(err => {
+                            console.error(`Error processing article ${article.link} in cluster: ${err.message}`);
+                            failedArticles.push({ link: article.link, error: err.message });
+                        });
+                    batchPromises.push(promise);
+                    // Wait for a short period before the next request in the batch
+                    if (batch.indexOf(article) < batch.length - 1) {
+                        await new Promise(resolve => setTimeout(resolve, 1000)); // 1-second delay
                     }
-                });
-
-                if (i + BATCH_SIZE < articles.length && successfulSummaries.length < SUMMARY_TARGET) {
-                    console.log('Waiting 60 seconds to respect API rate limits...');
-                    await new Promise(resolve => setTimeout(resolve, 60000));
                 }
+                await Promise.all(batchPromises);
+
+                // The old logic with long waits and Promise.allSettled is removed.
+                // The new logic processes sequentially with short delays.
             }
 
             const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
