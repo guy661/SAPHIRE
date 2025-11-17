@@ -7,6 +7,8 @@ const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 const Parser = require('rss-parser');
 const path = require('path');
 const fetch = require('node-fetch');
+const { default: axios } = require('axios');
+const cheerio = require('cheerio');
 const { summarizeArticleTask } = require('./task.js');
 
 puppeteer.use(StealthPlugin());
@@ -39,6 +41,34 @@ async function main() {
 
     const parser = new Parser();
 
+    async function extractRealUrl(googleRssUrl) {
+        try {
+            const response = await axios.get(googleRssUrl);
+            const $ = cheerio.load(response.data);
+            const data = $('c-wiz[data-p]').attr('data-p');
+            const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
+
+            const payload = {
+              'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
+            };
+
+            const headers = {
+              'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+            };
+
+            
+            const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers });
+            const arrayString = JSON.parse(postResponse.data.replace(")]}'", ""))[0][2];
+            const articleUrl = JSON.parse(arrayString)[1];
+
+            return articleUrl;
+        } catch (e) {
+            console.error("Error extracting real URL:", e);
+            return googleRssUrl;
+        }
+    }
+
     app.get("/rss", async (req, res) => {
         try {
             const keyword = req.query.keyword?.trim();
@@ -50,9 +80,13 @@ async function main() {
             const feed = await parser.parseString(xml);
             if (!feed.items?.length) return res.status(404).json({ error: "Keine Artikel gefunden" });
 
-            const cleanedItems = feed.items.slice(0, 10).map(item => {
-                return { ...item, link: item.link };
-            });
+            const cleanedItems = await Promise.all(feed.items.slice(0, 10).map(async (item) => {
+                const realUrl = await extractRealUrl(item.link) || item.source?.url || item.link;
+                return {
+                    ...item,
+                    link: realUrl
+                };
+            }));
 
             res.json(cleanedItems);
         } catch (err) {
@@ -99,6 +133,11 @@ async function main() {
                         failedArticles.push({ link: failedLink, error: result.reason.message });
                     }
                 });
+
+                if (i + BATCH_SIZE < articles.length && successfulSummaries.length < SUMMARY_TARGET) {
+                    console.log('Waiting 60 seconds to respect API rate limits...');
+                    await new Promise(resolve => setTimeout(resolve, 60000));
+                }
             }
 
             const finalSummaries = successfulSummaries.slice(0, SUMMARY_TARGET);
@@ -129,7 +168,7 @@ async function main() {
     });
     app.use(express.static(path.join(__dirname, 'public')));
 
-    const PORT = process.env.PORT || 3001;
+    const PORT = 3001;
     console.log(`[Server] Attempting to listen on port: ${PORT}`);
     console.log("Express app configured, starting server...");
     app.listen(PORT, () => {

@@ -310,4 +310,4 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
     return newSummary;
 };
 
-module.exports = { summarizeArticleTask };
+module.exports = { summarizeArticleTask }; 
