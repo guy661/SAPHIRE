@@ -37,7 +37,7 @@ let db = new sqlite3.Database(DBSOURCE, (err) => {
                     { name: 'date', type: 'TEXT' },
                     { name: 'cached_at', type: 'DATETIME' }
                 ];
-
+//Sigmas
                 db.all("PRAGMA table_info(articles)", (err, existingColumns) => {
                     if (err) {
                         console.error('Error fetching table info:', err.message);
