@@ -171,12 +171,24 @@
                 }
             };
             
-            const renderDashboard = (summaries) => {
+            const renderDashboard = (summaries, metaSummary) => {
                 dashboardDiv.innerHTML = "";
-                if (summaries.length === 0) {
+
+                if (!metaSummary && summaries.length === 0) {
                     dashboardDiv.innerHTML = `<div class="text-center"><p style="color: var(--text-secondary-color);">No summaries could be generated. Please try a different search term.</p></div>`;
                     return;
                 }
+
+                if (metaSummary) {
+                    const metaCard = document.createElement("div");
+                    metaCard.className = "card-ui meta-summary";
+                    metaCard.innerHTML = `
+                        <h5 class="card-title">Meta Summary</h5>
+                        <p class="card-text">${metaSummary.replace(/\*/g, '')}</p>
+                    `;
+                    dashboardDiv.appendChild(metaCard);
+                }
+
                 summaries.forEach(a => {
                     const card = document.createElement("div");
                     card.className = "card-ui";
@@ -257,9 +269,9 @@
                         if (summaryRes.status === 401) showLogin();
                         throw data;
                     }
-                    const summaries = await summaryRes.json();
+                    const data = await summaryRes.json();
                     
-                    renderDashboard(summaries);
+                    renderDashboard(data.summaries, data.metaSummary);
 
                 } catch (err) {
                     renderError(errorContainer, err);
