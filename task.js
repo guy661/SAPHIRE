@@ -2,9 +2,9 @@ require('dotenv').config();
 const fetch = require('node-fetch');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
-const db = require('./database.js');
+const { db } = require('./database.js');
 
-// --- Helper Functions ---
+
 
 function withTimeout(promise, ms) {
     return new Promise((resolve, reject) => {
@@ -86,7 +86,7 @@ async function detectPaywall(page) {
             }
         }
     } catch (error) {
-        // Ignore errors
+        
     }
     return false;
 }
@@ -138,10 +138,10 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
         const link = article.link;
         console.log('summarizeArticleTask started for link:', link);
 
-        // Cache check remains the same, using the original link.
-        // This is a trade-off: it might miss if the redirect URL changes,
-        // but it avoids a fetch for every request. The cache will be populated
-        // with the final URL later, improving future hits for that specific final URL.
+        
+        
+        
+        
         const cachedArticle = await new Promise((resolve, reject) => {
             db.get("SELECT title, summary, date, cached_at FROM articles WHERE link = ?", [link], (err, row) => {
                 if (err) return reject(err);
@@ -191,7 +191,7 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
                 console.log(`[Fast Path] ✅ Success with Readability for ${finalUrl}`);
                 articleText = readableArticle.textContent;
             } else {
-                // Readability failed, try <p> tag fallback
+                
                 console.log(`[Fast Path] Readability failed or content too short. Trying <p> tag fallback for ${finalUrl}.`);
                 const pText = Array.from(doc.window.document.querySelectorAll('p')).map(p => p.textContent).join('\n');
                 if (pText.length > 250) {
@@ -222,14 +222,14 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
                     console.log('[Consent] Starting robust auto-consent check (with iframe support)...');
                     let clicked = false;
 
-                    // Loop for a few seconds to find and click the consent button
+                    
                     for (let i = 0; i < 7; i++) {
                         for (const frame of page.frames()) {
                             try {
                                 const frameClicked = await frame.evaluate(() => {
                                     const positiveTexts = ['accept all', 'alle akzeptieren', 'i agree', 'zustimmen', 'ok', 'einverstanden'];
                                     const selectors = [
-                                        '#L2AGLb', // Google
+                                        '#L2AGLb', 
                                         'form[action*="consent"] button',
                                         'button[aria-label*="Accept"]',
                                         'button[aria-label*="agree"]',
@@ -239,13 +239,13 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
                                     ];
 
                                     const click = (el, reason) => {
-                                        // This console.log runs in the browser context, useful for headful debugging
+                                        
                                         console.log(`[Consent Eval] Clicking: ${reason}`);
                                         el.click();
                                         return true;
                                     };
 
-                                    // 1. Try text search on all buttons
+                                    
                                     const allButtons = document.querySelectorAll('button, [role="button"]');
                                     for (const button of allButtons) {
                                         const text = (button.innerText || button.textContent || button.getAttribute('aria-label') || '').toLowerCase();
@@ -254,7 +254,7 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
                                         }
                                     }
 
-                                    // 2. Try specific selectors
+                                    
                                     for (const selector of selectors) {
                                         const el = document.querySelector(selector);
                                         if (el) return click(el, `Element with selector "${selector}"`);
@@ -265,11 +265,11 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
 
                                 if (frameClicked) {
                                     clicked = true;
-                                    break; // Exit frame loop
+                                    break; 
                                 }
-                            } catch (e) { /* Ignore errors in frames, e.g. cross-origin */ }
+                            } catch (e) {  }
                         }
-                        if (clicked) break; // Exit main loop
+                        if (clicked) break; 
 
                         console.log(`[Consent] No button found yet, waiting... (Attempt ${i + 1}/7)`);
                         await new Promise(r => setTimeout(r, 500));
@@ -318,7 +318,7 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
         }
 
         const summarizedText = await summarizeText(articleText, length);
-        // Use finalUrl for the summary object and for the database key
+        
         const newSummary = { title: article.title, summary: summarizedText, link: finalUrl, date: article.pubDate };
         
             db.run(
@@ -327,6 +327,6 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
             );
         
             return newSummary;
-            })(), 90000); // 90-second timeout for the entire task
+            })(), 90000); 
         };
-module.exports = { summarizeArticleTask }; 
+module.exports = { summarizeArticleTask };

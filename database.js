@@ -1,10 +1,11 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
+const bcrypt = require('bcrypt');
 
 const DBSOURCE = "./db/db.sqlite";
 
-// Ensure the directory for the database exists
+
 const dbDir = path.dirname(DBSOURCE);
 if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
@@ -13,13 +14,13 @@ if (!fs.existsSync(dbDir)) {
 
 let db = new sqlite3.Database(DBSOURCE, (err) => {
     if (err) {
-      // Cannot open database
+      
       console.error(err.message)
       throw err
     }else{
         console.log('Connected to the SQLite database.');
         db.serialize(() => {
-            // First, ensure the table exists
+            
             db.run(`CREATE TABLE IF NOT EXISTS articles (
                 link TEXT PRIMARY KEY,
                 open_count INTEGER DEFAULT 0
@@ -28,16 +29,27 @@ let db = new sqlite3.Database(DBSOURCE, (err) => {
                     console.error('Error creating articles table:', err.message);
                     return;
                 }
-                console.log('Table "articles" is ready.');
-
-                // Next, add new columns for caching if they don't exist
-                const columns = [
+                                console.log('Table "articles" is ready.');
+                
+                                db.run(`CREATE TABLE IF NOT EXISTS users (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    username TEXT UNIQUE,
+                                    password TEXT
+                                )`, (err) => {
+                                    if (err) {
+                                        console.error('Error creating users table:', err.message);
+                                        return;
+                                    }
+                                    console.log('Table "users" is ready.');
+                                });
+                
+                                const columns = [
                     { name: 'title', type: 'TEXT' },
                     { name: 'summary', type: 'TEXT' },
                     { name: 'date', type: 'TEXT' },
                     { name: 'cached_at', type: 'DATETIME' }
                 ];
-//Sigmas
+
                 db.all("PRAGMA table_info(articles)", (err, existingColumns) => {
                     if (err) {
                         console.error('Error fetching table info:', err.message);
@@ -61,4 +73,39 @@ let db = new sqlite3.Database(DBSOURCE, (err) => {
     }
 });
 
-module.exports = db;
+
+function createUser(username, password) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            
+            const hashedPassword = await bcrypt.hash(password, 10);
+            
+            db.run('INSERT INTO users (username, password) VALUES (?, ?)', [username, hashedPassword], function(err) {
+                if (err) {
+                    
+                    reject(err);
+                } else {
+                    
+                    resolve({ id: this.lastID });
+                }
+            });
+        } catch (error) {
+            
+            reject(error);
+        }
+    });
+}
+
+function getUserByUsername(username) {
+    return new Promise((resolve, reject) => {
+        db.get('SELECT * FROM users WHERE username = ?', [username], (err, row) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(row);
+            }
+        });
+    });
+}
+
+module.exports = { db, createUser, getUserByUsername };
