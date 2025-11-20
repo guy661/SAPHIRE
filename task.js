@@ -103,7 +103,11 @@ async function callGemini(prompt) {
         throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
     }
     const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    const summary = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    if (!summary.trim()) {
+        throw new Error("Gemini API returned an empty summary.");
+    }
+    return summary;
 }
 
 async function summarizeText(text, length) {
@@ -115,6 +119,8 @@ async function summarizeText(text, length) {
     };
     const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
 
+    let finalSummary = "";
+
     if (chunks.length > 1) {
         const chunkSummaryPromises = chunks.map(chunk => callGemini(`Fasse diesen Textabschnitt zusammen:
 
@@ -124,13 +130,18 @@ ${chunk}`));
 ${basePrompt}
 Zusammenfassungen:
 ${chunkSummaries.join("---")}`;
-        return callGemini(combinationPrompt);
+        finalSummary = await callGemini(combinationPrompt);
     } else {
         const prompt = `${basePrompt}
 Artikel:
 ${chunks[0]}`;
-        return callGemini(prompt);
+        finalSummary = await callGemini(prompt);
     }
+
+    if (!finalSummary.trim()) {
+        throw new Error("Summarization process resulted in an empty summary.");
+    }
+    return finalSummary;
 }
 
 const summarizeArticleTask = async ({ page, data: { article, length } }) => {
