@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcrypt');
 
-const DBSOURCE = "./db/db.sqlite";
+const DBSOURCE = path.join(__dirname, 'db', 'db.sqlite');
 
 
 const dbDir = path.dirname(DBSOURCE);
@@ -41,6 +41,20 @@ let db = new sqlite3.Database(DBSOURCE, (err) => {
                                         return;
                                     }
                                     console.log('Table "users" is ready.');
+
+                                    db.run(`CREATE TABLE IF NOT EXISTS topics (
+                                        user_id INTEGER PRIMARY KEY,
+                                        main_topic TEXT,
+                                        include_keywords TEXT,
+                                        exclude_keywords TEXT,
+                                        FOREIGN KEY (user_id) REFERENCES users (id)
+                                    )`, (err) => {
+                                        if (err) {
+                                            console.error('Error creating topics table:', err.message);
+                                            return;
+                                        }
+                                        console.log('Table "topics" is ready.');
+                                    });
                                 });
                 
                                 const columns = [
@@ -108,4 +122,36 @@ function getUserByUsername(username) {
     });
 }
 
-module.exports = { db, createUser, getUserByUsername };
+function getTopicByUserId(userId) {
+    return new Promise((resolve, reject) => {
+        db.get('SELECT * FROM topics WHERE user_id = ?', [userId], (err, row) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(row);
+            }
+        });
+    });
+}
+
+function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords }) {
+    return new Promise((resolve, reject) => {
+        const sql = `
+            INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                main_topic = excluded.main_topic,
+                include_keywords = excluded.include_keywords,
+                exclude_keywords = excluded.exclude_keywords;
+        `;
+        db.run(sql, [userId, main_topic, include_keywords, exclude_keywords], function(err) {
+            if (err) {
+                reject(err);
+            } else {
+                resolve({ changes: this.changes });
+            }
+        });
+    });
+}
+
+module.exports = { db, createUser, getUserByUsername, getTopicByUserId, upsertTopic };

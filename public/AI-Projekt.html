@@ -59,6 +59,7 @@
         <nav class="navbar">
             <span class="navbar-brand">SYNAPSE</span>
             <div>
+                <a href="/personalization" class="btn-ghost" style="margin-right: 1rem;">Personalize</a>
                 <span class="navbar-text">User: <strong id="username-display"></strong></span>
                 <button id="logoutBtn" class="btn btn-outline-danger btn-sm">Logout</button>
             </div>
@@ -67,13 +68,13 @@
         <main>
             <form id="searchForm">
                 <i class="bi bi-search" style="color: var(--text-secondary-color);"></i>
-                <input id="keyword" class="form-control" type="search" placeholder="Search for news (e.g., 'AI in medicine')">
+                <input id="keyword" class="form-control" type="search" placeholder="Set a topic in Personalize to get started...">
                 <select id="summaryLength" class="form-select">
                     <option value="short">Short</option>
                     <option value="medium" selected>Medium</option>
                     <option value="long">Long</option>
                 </select>
-                <button id="loadBtn" class="btn btn-primary" type="submit">Summarize</button>
+                <button id="loadBtn" class="btn btn-primary" type="submit">Get News</button>
             </form>
 
             <div id="resultsArea">
@@ -117,14 +118,21 @@
                     options.credentials = 'include';
                     options.headers = { 'Content-Type': 'application/json', ...options.headers };
                     const res = await fetch(`/api${endpoint}`, options);
-                    const data = await res.json();
-                    if (!res.ok) throw data;
-                    return data;
+                    if (!res.ok) {
+                        const errorData = await res.json().catch(() => ({ error: 'An unknown error occurred' }));
+                        throw errorData;
+                    }
+                    // For logout, response might not be JSON
+                    if (res.status === 200 && endpoint === '/logout') {
+                         return { message: 'Logged out successfully' };
+                    }
+                    return res.json();
                 },
                 login(u, p) { return this.request('/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) }); },
                 register(u, p) { return this.request('/register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) }); },
                 logout() { return this.request('/logout', { method: 'POST' }); },
                 getUser() { return this.request('/user'); },
+                getTopics() { return this.request('/topics'); },
                 fetchRSS(keyword) { return fetch(`/api/rss?keyword=${encodeURIComponent(keyword)}`, { credentials: 'include' }); },
                 summarize(articles, length) {
                     return fetch("/api/summarize", {
@@ -175,7 +183,7 @@
                 dashboardDiv.innerHTML = "";
 
                 if (!metaSummary && summaries.length === 0) {
-                    dashboardDiv.innerHTML = `<div class="text-center"><p style="color: var(--text-secondary-color);">No summaries could be generated. Please try a different search term.</p></div>`;
+                    dashboardDiv.innerHTML = `<div class="text-center"><p style="color: var(--text-secondary-color);">No summaries could be generated. Please try a different search term or adjust your personalization settings.</p></div>`;
                     return;
                 }
 
@@ -220,6 +228,7 @@
                 try {
                     const user = await api.login(loginForm.elements['login-username'].value, loginForm.elements['login-password'].value);
                     showApp(user);
+                    loadAppData();
                 } catch (err) {
                     showAlert(authError, err.error || "Login failed.");
                 }
@@ -231,6 +240,7 @@
                 try {
                     const user = await api.register(registerForm.elements['register-username'].value, registerForm.elements['register-password'].value);
                     showApp(user);
+                    loadAppData();
                 } catch (err) {
                     showAlert(authError, err.error || "Registration failed.");
                 }
@@ -248,14 +258,25 @@
             searchForm.addEventListener("submit", async (e) => {
                 e.preventDefault();
                 const keyword = keywordInput.value.trim();
-                if (!keyword) return;
+                
+                // If the input is disabled, it means we are using the personalized topic.
+                // The backend handles the case where the keyword is empty and a topic is set.
+                if (keywordInput.disabled && !keyword) {
+                    // Let it proceed with empty keyword
+                } else if (!keyword) {
+                     // If input is enabled and empty, do nothing.
+                    return;
+                }
 
                 dashboardDiv.innerHTML = '';
                 errorContainer.classList.add('d-none');
                 loadingSpinner.style.display = 'block';
 
                 try {
+                    // The backend now intelligently decides whether to use the keyword 
+                    // or the user's saved topic based on this single endpoint.
                     const rssRes = await api.fetchRSS(keyword);
+
                     if (!rssRes.ok) {
                         const data = await rssRes.json();
                         if (rssRes.status === 401) showLogin();
@@ -280,11 +301,29 @@
                 }
             });
             
+            async function loadAppData() {
+                try {
+                    const topic = await api.getTopics();
+                    if (topic && topic.main_topic) {
+                        keywordInput.value = `Your Topic: ${topic.main_topic}`;
+                        keywordInput.disabled = true;
+                    } else {
+                        keywordInput.placeholder = "Set a topic in Personalize or search manually...";
+                        keywordInput.disabled = false;
+                    }
+                } catch (error) {
+                    console.error("Could not load topics", error);
+                    keywordInput.placeholder = "Could not load topic. Search manually...";
+                    keywordInput.disabled = false;
+                }
+            }
+
             // --- Initial Load ---
             (async () => {
                 try {
                     const user = await api.getUser();
                     showApp(user);
+                    loadAppData();
                 } catch (err) {
                     showLogin();
                 }
