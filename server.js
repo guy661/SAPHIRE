@@ -45,6 +45,21 @@ async function retry(fn, retries = 3, delay = 1000) {
     }
 }
 
+async function callGemini(prompt) {
+    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const response = await fetch(geminiApiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+    });
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
+    }
+    const data = await response.json();
+    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+}
+
 async function main() {
     console.log("Main function started");
 
@@ -204,7 +219,11 @@ async function main() {
 
         try {
             const newUser = await createUser(username, password);
-            res.status(201).json({ message: 'User created successfully', userId: newUser.id });
+            
+            req.session.userId = newUser.id;
+            req.session.username = username;
+
+            res.status(201).json({ message: 'User created successfully', userId: newUser.id, username: username });
         } catch (error) {
             if (error.code === 'SQLITE_CONSTRAINT') {
                 res.status(409).json({ error: 'Username already exists' });
@@ -299,7 +318,13 @@ async function main() {
             const originalOrder = articles.map(a => a.link);
             finalSummaries.sort((a, b) => originalOrder.indexOf(a.link) - originalOrder.indexOf(b.link));
             
-            res.json(finalSummaries);
+            let metaSummary = null;
+            if (finalSummaries.length > 1) {
+                const metaSummaryPrompt = `Fasse diese ${finalSummaries.length} Zusammenfassungen in einem kurzen Absatz zusammen (maximal 4 Sätze), der die wichtigsten gemeinsamen Themen oder Schlussfolgerungen hervorhebt:\n\n` + finalSummaries.map((s, i) => `Zusammenfassung ${i+1}:\n${s.summary}`).join('\n\n');
+                metaSummary = await callGemini(metaSummaryPrompt);
+            }
+
+            res.json({ summaries: finalSummaries, metaSummary });
 
         } catch (err) {
             console.error(err);

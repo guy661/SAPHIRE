@@ -67,6 +67,19 @@ function chunkText(text, maxLength = 18000) {
     return finalChunks;
 }
 
+async function retry(fn, retries = 3, delay = 1000) {
+    try {
+        return await fn();
+    } catch (err) {
+        if (retries > 0) {
+            console.log(`Retrying... attempts left: ${retries}`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            return retry(fn, retries - 1, delay * 2);
+        }
+        throw err;
+    }
+}
+
 async function detectPaywall(page) {
     const paywallSelectors = [
         '[id*="paywall"]',
@@ -76,15 +89,32 @@ async function detectPaywall(page) {
         '.leaky_paywall',
         '.tp-modal',
         '#pico-overlay',
+        '[class*="gate"]',
+        '[class*="pzw"]',
+        '[class*="fc-ab-root"]',
+        '[id*="wrapper-piano-id"]'
+
     ];
 
     try {
         for (const selector of paywallSelectors) {
-            if (await page.$(selector) !== null) {
+            if (await page.evaluate(s => document.querySelector(s), selector)) {
                 console.log(`[Paywall] Detected with selector: ${selector}`);
                 return true;
             }
         }
+        const isScrollingDisabled = await page.evaluate(() => {
+            const bodyStyle = window.getComputedStyle(document.body);
+            const htmlStyle = window.getComputedStyle(document.documentElement);
+            return bodyStyle.overflow === 'hidden' || htmlStyle.overflow === 'hidden' || bodyStyle.overflowY === 'hidden' || htmlStyle.overflowY === 'hidden';
+        });
+
+        if (isScrollingDisabled) {
+            console.log('[Paywall] Detected: Scrolling is disabled on body or html.');
+            return true;
+        }
+
+
     } catch (error) {
         
     }
@@ -113,9 +143,9 @@ async function callGemini(prompt) {
 async function summarizeText(text, length) {
     const chunks = chunkText(text.trim());
     const lengthPrompts = {
-        short: "Kurze Zusammenfassung (2-3 Sätze):",
-        medium: "Zusammenfassung (Überblick + 3-4 Stichpunkte):",
-        long: "Detaillierte Zusammenfassung (Überblick + 5-6 Stichpunkte mit Erklärungen):"
+        short: "Fasse den Artikel in genau 3 Sätzen zusammen.",
+        medium: "Fasse den Artikel in 5-6 Sätzen zusammen.",
+        long: "Fasse den Artikel in 8-10 Sätzen zusammen."
     };
     const basePrompt = lengthPrompts[length] || lengthPrompts.medium;
 
@@ -179,14 +209,14 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
 
         try {
             console.log(`[Fast Path] Attempting lightweight fetch for ${link}`);
-            const response = await fetch(link, {
+            const response = await retry(() => fetch(link, {
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                     'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
                 },
                 timeout: 15000
-            });
+            }));
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
