@@ -167,7 +167,7 @@ const semanticCheckTask = async ({ page, data: { article, userTopic } }) => {
 
                 User's interests:
                 - General Topic: "${userTopic.main_topic}"
-                - Must Include Themes: "${userTopic.include_keywords || 'Any'}"
+                - Must Include Themes: "${userTopic.include_keywords || 'N/A'}"
                 - Must Exclude Themes: "${userTopic.exclude_keywords || 'None'}"
 
                 Article Snippet:
@@ -177,9 +177,9 @@ const semanticCheckTask = async ({ page, data: { article, userTopic } }) => {
 
                 Instructions:
                 1. Analyze if the article snippet is primarily about the "General Topic".
-                2. Analyze if the article's content is clearly relevant to the "Must Include Themes". This is a mandatory requirement unless the theme is 'Any'.
+                2. If "Must Include Themes" is not 'N/A', analyze if the article's content is clearly relevant to them. This is a mandatory requirement.
                 3. Analyze if the article contains any of the "Must Exclude Themes".
-                4. Based on this, decide if the article is relevant. It is only relevant if it matches the "Must Include" criteria AND does not contain any "Must Exclude" criteria.
+                4. Based on this, decide if the article is relevant. It is only relevant if it matches the "Must Include" criteria (if applicable) AND does not contain any "Must Exclude" criteria.
                 5. Respond in a valid JSON format with no other text or markdown: {"is_relevant": boolean, "reason": "A brief analysis of your decision."}
             `;
             
