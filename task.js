@@ -158,6 +158,7 @@ async function _getArticleContent({ page, article }) {
  * NEW TASK: Checks if an article semantically matches user criteria.
  */
 const semanticCheckTask = async ({ page, data: { article, userTopic } }) => {
+    console.log('[Semantic Check] Task started for article:', article ? article.link : 'undefined article');
     return withTimeout((async () => {
         try {
             const { articleText } = await _getArticleContent({ page, article });
