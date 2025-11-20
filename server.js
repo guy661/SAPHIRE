@@ -12,7 +12,7 @@ const path = require('path');
 const fetch = require('node-fetch');
 const { default: axios } = require('axios');
 const cheerio = require('cheerio');
-const { summarizeArticleTask, semanticCheckTask } = require('./task.js');
+const { summarizeArticleTask, getContentTask } = require('./task.js');
 const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic } = require('./database.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
@@ -76,12 +76,9 @@ async function initializeCluster() {
             },
             timeout: 120000 // Increased timeout for potentially long tasks
         });
-        // Register both tasks with explicit names
-        await cluster.task('summarizeArticleTask', summarizeArticleTask);
-        await cluster.task('semanticCheckTask', semanticCheckTask);
 
         isClusterReady = true;
-        console.log('[Server] ✅ Puppeteer cluster successfully started with all tasks.');
+        console.log('[Server] ✅ Puppeteer cluster successfully started.');
     } catch (err) {
         console.error('[Server] ❌ Critical error: Puppeteer cluster failed to launch.', err);
     }
@@ -183,47 +180,115 @@ async function main() {
                 return res.status(400).json({ error: "No search topic specified. Please set a topic in your personalization settings." });
             }
 
-            // 1. Broad search
+            // Step 1: Broad search for article links
             const broadQuery = userTopic.main_topic;
-            console.log(`[Semantic Search] Performing broad search for: "${broadQuery}"`);
+            console.log(`[Search] Performing broad search for: "${broadQuery}"`);
             const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(broadQuery)}&hl=de&gl=DE&ceid=DE:de`;
             const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
             if (!response.ok) throw new Error("Could not load RSS feed for broad search");
             
             const xml = await response.text();
             const feed = await parser.parseString(xml);
-            // Limit to first 20 articles for semantic check to manage performance
-            const articlesToCheck = feed.items.slice(0, 20); 
-            console.log(`[Semantic Search] Found ${articlesToCheck.length} articles to check.`);
+            const articlesToCheck = feed.items.slice(0, 20);
+            console.log(`[Search] Found ${articlesToCheck.length} articles. Extracting real URLs...`);
 
-            // 2. Semantic filtering in parallel
-            const checkPromises = articlesToCheck.map(article => 
-                cluster.execute({ article, userTopic }, { task: 'semanticCheckTask' })
-            );
+            // Step 1.5: Extract the real URLs from Google's redirect links
+            const articlesWithRealLinks = await Promise.all(articlesToCheck.map(async (article) => {
+                const realUrl = await extractRealUrl(article.link);
+                return { ...article, link: realUrl };
+            }));
             
-            const results = await Promise.allSettled(checkPromises);
+            console.log(`[Search] Extracted real URLs for ${articlesWithRealLinks.length} articles.`);
 
-            const semanticallyMatchedArticles = [];
-            results.forEach(result => {
+            // Step 2: Fetch content for all articles in parallel
+            console.log(`[Content Fetch] Getting content for ${articlesWithRealLinks.length} articles...`);
+            const contentPromises = articlesWithRealLinks.map(article => 
+                cluster.execute({ article }, getContentTask)
+            );
+            const articlesWithContentResults = await Promise.allSettled(contentPromises);
+
+            //--[ NEW DEBUG LOGGING ]--
+            console.log("\n--- DETAILED TASK LOGS ---");
+            articlesWithContentResults.forEach((result, index) => {
+                console.log(`\n[Article ${index + 1}] ${articlesToCheck[index].link}`);
                 if (result.status === 'fulfilled' && result.value) {
-                    semanticallyMatchedArticles.push(result.value);
+                    (result.value.logs || []).forEach(log => console.log(`  > ${log}`));
+                    if(result.value.error) {
+                        console.log(`  > ❗ Task returned an error: ${result.value.error}`);
+                    }
+                } else if (result.status === 'rejected') {
+                    console.log(`  > ❗❗ Task promise rejected: ${result.reason}`);
                 }
             });
-            console.log(`[Semantic Search] Matched ${semanticallyMatchedArticles.length} articles after filtering.`);
+            console.log("--- END DETAILED TASK LOGS ---\n");
+            //--[ END NEW DEBUG LOGGING ]--
+
+            const articlesWithContent = articlesWithContentResults
+                .filter(result => result.status === 'fulfilled' && result.value && !result.value.error)
+                .map(result => result.value);
+            
+            console.log(`[Content Fetch] Successfully got content for ${articlesWithContent.length} articles.`);
+
+            // Step 3: Perform semantic filtering on articles that have content
+            const semanticallyMatchedArticles = [];
+            console.log(`[Semantic Filter] Filtering ${articlesWithContent.length} articles...`);
+
+            for (const article of articlesWithContent) {
+                const prompt = `
+                    You are a research assistant. Your task is to determine if an article is relevant to a user's specific interests.
+
+                    User's interests:
+                    - General Topic: "${userTopic.main_topic}"
+                    - Must Include Themes: "${userTopic.include_keywords || 'N/A'}"
+                    - Must Exclude Themes: "${userTopic.exclude_keywords || 'None'}"
+
+                    Article Snippet:
+                    ---
+                    ${article.articleText.substring(0, 8000)}
+                    ---
+
+                    Instructions:
+                    1. Analyze if the article snippet is primarily about the "General Topic".
+                    2. If "Must Include Themes" is not 'N/A', analyze if the article's content is clearly relevant to them. This is a mandatory requirement.
+                    3. Analyze if the article contains any of the "Must Exclude Themes".
+                    4. Based on this, decide if the article is relevant. It is only relevant if it matches the "Must Include" criteria (if applicable) AND does not contain any "Must Exclude" criteria.
+                    5. Respond in a valid JSON format with no other text or markdown: {"is_relevant": boolean, "reason": "A brief analysis of your decision."}
+                `;
+
+                try {
+                    const decisionString = await callGemini(prompt);
+                    const jsonMatch = decisionString.match(/\{.*\}/);
+                    if (jsonMatch) {
+                        const decision = JSON.parse(jsonMatch[0]);
+                        console.log(`[Semantic Filter] AI decision for ${article.link}: ${decision.is_relevant}. Reason: ${decision.reason}`);
+                        if (decision.is_relevant === true) {
+                            // Don't send the full articleText to the client
+                            const { articleText, ...articleWithoutText } = article;
+                            semanticallyMatchedArticles.push(articleWithoutText);
+                        }
+                    } else {
+                        console.error(`[Semantic Filter] ⚠️ No JSON object found in AI response for ${article.link}.`);
+                    }
+                } catch (e) {
+                    console.error(`[Semantic Filter] ⚠️ Could not process AI response for ${article.link}. Error: ${e.message}`);
+                }
+            }
+
+            console.log(`[Semantic Filter] Matched ${semanticallyMatchedArticles.length} articles.`);
 
             if (semanticallyMatchedArticles.length === 0) {
-                 return res.status(404).json({ error: "No articles found that match your specific criteria." });
+                 return res.status(404).json({ error: "No articles found that match your specific criteria after filtering." });
             }
             
-            // 3. Sort by newest first
+            // Step 4: Sort by newest first
             semanticallyMatchedArticles.sort((a, b) => new Date(b.isoDate) - new Date(a.isoDate));
 
-            // 4. Respond with filtered & sorted list (no summaries yet)
+            // Step 5: Respond
             res.json(semanticallyMatchedArticles);
 
         } catch (err) {
-            console.error('[Semantic Search] Error in /api/rss:', err);
-            res.status(500).json({ error: err.message || "Error during semantic article search" });
+            console.error('[Search] Error in /api/rss:', err);
+            res.status(500).json({ error: err.message || "Error during article search" });
         }
     });
 
@@ -262,7 +327,7 @@ async function main() {
             if (!articles?.length) return res.status(400).json({ error: "No articles provided" });
 
             const summaryPromises = articles.map(article => 
-                cluster.execute({ article, length }, { task: 'summarizeArticleTask' })
+                cluster.execute({ article, length }, summarizeArticleTask)
             );
 
             const results = await Promise.allSettled(summaryPromises);
