@@ -367,16 +367,7 @@ async function main() {
 
 main().catch(err => { console.error("Unhandled error in main:", err); process.exit(1); });
 
-async function retry(fn, retries = 3, delay = 1000) {
-    try { return await fn(); } catch (err) {
-        if (retries > 0) {
-            console.log(`Retrying... attempts left: ${retries}`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return retry(fn, retries - 1, delay * 2);
-        }
-        throw err;
-    }
-}
+
 
 
 // NOTE: This function is brittle as it relies on reverse-engineered logic from Google News' internal API.
