@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 
 
@@ -47,11 +46,14 @@ async function retry(fn, retries = 3, delay = 1000) {
 
 async function callGemini(prompt) {
     const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
     const response = await fetch(geminiApiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
+        signal: controller.signal
+    }).finally(() => clearTimeout(id));
     if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
@@ -184,7 +186,9 @@ async function main() {
             const broadQuery = userTopic.main_topic;
             console.log(`[Search] Performing broad search for: "${broadQuery}"`);
             const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(broadQuery)}&hl=de&gl=DE&ceid=DE:de`;
-            const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
+            const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(id));
             if (!response.ok) throw new Error("Could not load RSS feed for broad search");
             
             const xml = await response.text();
@@ -220,7 +224,8 @@ async function main() {
                     console.log(`  > ❗❗ Task promise rejected: ${result.reason}`);
                 }
             });
-            console.log("--- END DETAILED TASK LOGS ---\n");
+            console.log("--- END DETAILED TASK LOGS ---\
+");
             //--[ END NEW DEBUG LOGGING ]--
 
             const articlesWithContent = articlesWithContentResults
@@ -249,7 +254,7 @@ async function main() {
 
                     Instructions:
                     1. Analyze if the article snippet is primarily about the "General Topic".
-                    2. If "Must Include Themes" is not 'N/A', analyze if the article's content is clearly relevant to them. This is a mandatory requirement.
+                    2. If "Must Include Themes" is not 'N/A', analyze if the article's content is clearly relevant to them.
                     3. Analyze if the article contains any of the "Must Exclude Themes".
                     4. Based on this, decide if the article is relevant. It is only relevant if it matches the "Must Include" criteria (if applicable) AND does not contain any "Must Exclude" criteria.
                     5. Respond in a valid JSON format with no other text or markdown: {"is_relevant": boolean, "reason": "A brief analysis of your decision."}
@@ -408,20 +413,6 @@ async function retry(fn, retries = 3, delay = 1000) {
     }
 }
 
-async function callGemini(prompt) {
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const response = await fetch(geminiApiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
-    }
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-}
 
 async function extractRealUrl(googleRssUrl) {
     return retry(async () => {

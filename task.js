@@ -24,11 +24,14 @@ async function retry(fn, retries = 3, delay = 1000) {
 
 async function callGemini(prompt) {
     const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
     const response = await fetch(geminiApiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-    });
+        signal: controller.signal
+    }).finally(() => clearTimeout(id));
     if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Gemini API Error: ${response.status} - ${errorText}`);
@@ -51,10 +54,12 @@ async function _getArticleContent({ page, article, logs }) {
 
     try {
         logs.push(`[Fast Path] Attempting for ${link}`);
+        const controller = new AbortController();
+        const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
         const response = await retry(() => fetch(link, {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
-            timeout: 15000
-        }));
+            signal: controller.signal
+        }).finally(() => clearTimeout(id)));
         if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
         
         finalUrl = response.url;
@@ -79,7 +84,7 @@ async function _getArticleContent({ page, article, logs }) {
                 else req.continue();
             });
 
-            await page.goto(link, { waitUntil: 'networkidle2', timeout: 60000 });
+            await page.goto(link, { waitUntil: "domcontentloaded", timeout: 20000 });
             finalUrl = page.url();
 
             try {
@@ -107,6 +112,10 @@ async function _getArticleContent({ page, article, logs }) {
                 throw new Error("Puppeteer Readability check failed or content too short.");
             }
             articleText = readableArticle.textContent;
+            if (!articleText) {
+                logs.push(`[Slow Path] ❌ Content extraction failed: articleText is empty for ${link}`);
+                throw new Error(`Content extraction failed for ${link}`);
+            }
             logs.push(`[Slow Path] ✅ Success for ${finalUrl}`);
 
         } catch (puppeteerError) {
