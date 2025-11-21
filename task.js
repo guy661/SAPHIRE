@@ -17,11 +17,12 @@ async function _getArticleContent({ page, article, logs }) {
 
     let articleText, finalUrl = link;
 
-    // Set up request interception to block images, fonts, and media
+    // Set up request interception to block images, fonts, media, and stylesheets
     await page.setRequestInterception(true);
+    await page.setBypassCSP(true); // Bypass Content Security Policy for the page
     if (page.listenerCount('request') === 0) {
         page.on('request', (req) => {
-            if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
+            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
             else req.continue();
         });
     }
@@ -98,13 +99,9 @@ async function _getArticleContent({ page, article, logs }) {
                 logs.push(`[getArticleContent] Slow Path: No paywall detected.`);
             }
 
-            const bodyHtml = await page.content();
-            const doc = new JSDOM(bodyHtml, { url: finalUrl });
-            const reader = new Readability(doc.window.document);
-            const readableArticle = reader.parse();
+            articleText = await page.evaluate(() => document.body.innerText);
             
-            if (readableArticle && readableArticle.textContent) {
-                articleText = readableArticle.textContent;
+            if (articleText) {
                 logs.push(`[getArticleContent] Slow Path extracted text length: ${articleText.length}`);
             } else {
                  logs.push(`[getArticleContent] ❌ Slow Path: Content extraction failed (articleText is empty).`);
