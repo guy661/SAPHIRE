@@ -115,7 +115,7 @@ async function _getArticleContent({ page, article, logs }) {
 
         } catch (puppeteerError) {
             logs.push(`[getArticleContent] ❌ Slow Path FAILED for ${link}: ${puppeteerError.message}`);
-            throw puppeteerError; // Rethrow to be caught by the main try-catch
+            // Don't rethrow, just log the error and let the process continue.
         }
     }
 
