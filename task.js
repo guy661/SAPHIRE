@@ -17,26 +17,6 @@ async function _getArticleContent({ page, article, logs }) {
 
     let articleText, finalUrl = link;
 
-    // Suppress console errors from the page
-    page.removeAllListeners('console');
-    page.on('console', msg => {
-        if (msg.type() === 'error' && msg.text().includes('Could not parse CSS stylesheet')) {
-            // Suppress this specific error
-        } else {
-            logs.push(`[PAGE CONSOLE] ${msg.type()}: ${msg.text()}`);
-        }
-    });
-
-    // Set up request interception to block images, fonts, media, and stylesheets
-    await page.setRequestInterception(true);
-    await page.setBypassCSP(true); // Bypass Content Security Policy for the page
-    if (page.listenerCount('request') === 0) {
-        page.on('request', (req) => {
-            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) req.abort();
-            else req.continue();
-        });
-    }
-
 
     try {
         logs.push(`[getArticleContent] Attempting Fast Path for ${link}`);

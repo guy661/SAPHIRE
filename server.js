@@ -41,6 +41,38 @@ async function initializeCluster() {
             timeout: 120000 // Increased timeout for potentially long tasks
         });
 
+        // Set up a global task that will be executed for each job
+        await cluster.task(async ({ page, data }) => {
+            // Set up the page
+            await page.setRequestInterception(true);
+            page.on('request', (req) => {
+                if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+                    req.abort();
+                } else {
+                    req.continue();
+                }
+            });
+
+            page.on('console', msg => {
+                if (msg.type() === 'error' && msg.text().includes('Could not parse CSS stylesheet')) {
+                    // Suppress this specific error
+                } else {
+                    // In a real app, you might want to log these to a file instead of stdout
+                    // console.log(`[PAGE CONSOLE] ${msg.type()}: ${msg.text()}`);
+                }
+            });
+
+            page.on('pageerror', (err) => {
+                // In a real app, you might want to log these to a file instead of stdout
+                // console.log(`[PAGE ERROR] ${err.message}`);
+            });
+            
+            await page.setBypassCSP(true);
+
+            // Execute the actual task function passed in the data
+            return await data.taskFunction({ page, data: data.taskData });
+        });
+
         isClusterReady = true;
         console.log('[Server] ✅ Puppeteer cluster successfully started.');
     } catch (err) {
@@ -172,7 +204,7 @@ async function main() {
             // Step 2: Fetch content for all articles in parallel
             console.log(`[Content Fetch] Getting content for ${articlesWithRealLinks.length} articles...`);
             const contentPromises = articlesWithRealLinks.map(article => 
-                cluster.execute({ article }, getContentTask)
+                cluster.execute({ taskFunction: getContentTask, taskData: { article } })
             );
             const articlesWithContentResults = await Promise.allSettled(contentPromises);
 
@@ -297,7 +329,7 @@ async function main() {
             if (!articles?.length) return res.status(400).json({ error: "No articles provided" });
 
             const summaryPromises = articles.map(article => 
-                cluster.execute({ article, length }, summarizeArticleTask)
+                cluster.execute({ taskFunction: summarizeArticleTask, taskData: { article, length } })
             );
 
             const results = await Promise.allSettled(summaryPromises);
