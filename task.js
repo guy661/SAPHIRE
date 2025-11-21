@@ -1,4 +1,5 @@
 require('dotenv').config();
+const fetch = require('node-fetch');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { db } = require('./database.js');
@@ -15,6 +16,16 @@ async function _getArticleContent({ page, article, logs }) {
     logs.push(`[getArticleContent] START: Processing ${link}`);
 
     let articleText, finalUrl = link;
+
+    // Set up request interception to block images, fonts, and media
+    await page.setRequestInterception(true);
+    if (!page.listeners('request').length) {
+        page.on('request', (req) => {
+            if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
+            else req.continue();
+        });
+    }
+
 
     try {
         logs.push(`[getArticleContent] Attempting Fast Path for ${link}`);
@@ -53,12 +64,6 @@ async function _getArticleContent({ page, article, logs }) {
         logs.push(`[getArticleContent] Attempting Slow Path (Puppeteer) for ${link}`);
         
         try {
-            await page.setRequestInterception(true);
-            page.on('request', (req) => {
-                if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
-                else req.continue();
-            });
-
             logs.push(`[getArticleContent] Slow Path: Navigating to ${link}`);
             await page.goto(link, { waitUntil: "networkidle2", timeout: 30000 });
             await page.waitForTimeout(1000);
