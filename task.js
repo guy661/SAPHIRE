@@ -15,7 +15,7 @@ async function _getArticleContent({ page, article, logs }) {
     logs.push(`[getArticleContent] --------------------------------------------------`);
     logs.push(`[getArticleContent] START: Processing ${link}`);
 
-    let articleText, finalUrl = link;
+    let articleText, finalUrl = link, title = article.title;
 
 
     try {
@@ -40,6 +40,7 @@ async function _getArticleContent({ page, article, logs }) {
 
         if (readableArticle && readableArticle.textContent) {
             articleText = readableArticle.textContent;
+            title = readableArticle.title;
             logs.push(`[getArticleContent] Fast Path extracted text length: ${articleText.length}`);
             if (articleText.length < 250) {
                  logs.push(`[getArticleContent] Fast Path content too short, falling back.`);
@@ -56,8 +57,10 @@ async function _getArticleContent({ page, article, logs }) {
         
         try {
             logs.push(`[getArticleContent] Slow Path: Navigating to ${link}`);
-            await page.goto(link, { waitUntil: "networkidle2", timeout: 30000 });
-            await page.waitForTimeout(1000);
+            await page.goto(link, {
+                waitUntil: 'domcontentloaded', // Do not wait for CSS/JS/images
+                timeout: 15000                 // 15s timeout
+            });
             finalUrl = page.url();
             logs.push(`[getArticleContent] Slow Path final URL: ${finalUrl}`);
 
@@ -90,6 +93,7 @@ async function _getArticleContent({ page, article, logs }) {
             }
 
             articleText = await page.evaluate(() => document.body.innerText);
+            title = await page.title();
             
             if (articleText) {
                 logs.push(`[getArticleContent] Slow Path extracted text length: ${articleText.length}`);
@@ -113,7 +117,7 @@ async function _getArticleContent({ page, article, logs }) {
 
     logs.push(`[getArticleContent] END: Successfully processed ${link}. Final length: ${articleText.length}`);
     logs.push(`[getArticleContent] --------------------------------------------------`);
-    return { articleText, finalUrl };
+    return { articleText, finalUrl, title };
 }
 
 const getContentTask = async ({ page, data: { article } }) => {
@@ -121,8 +125,8 @@ const getContentTask = async ({ page, data: { article } }) => {
     logs.push(`[getContentTask] >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>`);
     logs.push(`[getContentTask] Task START for ${article.link}`);
     try {
-        const { articleText, finalUrl } = await retry(() => _getArticleContent({ page, article, logs }), 2, 2000);
-        const result = { ...article, articleText, link: finalUrl, logs };
+        const { articleText, finalUrl, title } = await _getArticleContent({ page, article, logs });
+        const result = { ...article, title, articleText, link: finalUrl, logs };
         logs.push(`[getContentTask] Task END for ${article.link}. Success.`);
         logs.push(`[getContentTask] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
         return result;
@@ -133,61 +137,4 @@ const getContentTask = async ({ page, data: { article } }) => {
     }
 };
 
-const summarizeArticleTask = async ({ page, data: { article, length } }) => {
-    const logs = [];
-    const link = article.link;
-    logs.push(`[Summarize] >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>`);
-    logs.push(`[Summarize] Task START for ${link}`);
-    
-    const cachedSummary = await new Promise((resolve) => {
-        db.get("SELECT summary FROM articles WHERE link = ? AND cached_at > datetime('now', '-24 hours')", [link], (err, row) => {
-            if (row && row.summary) {
-                logs.push(`[Summarize] Cache HIT for summary: ${link}`);
-                resolve(row.summary);
-            } else {
-                resolve(null);
-            }
-        });
-    });
-    if (cachedSummary) {
-        logs.push(`[Summarize] Task END for ${link}. Returning cached summary.`);
-        logs.push(`[Summarize] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
-        return { ...article, summary: cachedSummary, logs };
-    }
-    logs.push(`[Summarize] Cache MISS for summary: ${link}`);
-
-    try {
-        logs.push(`[Summarize] Calling _getArticleContent for ${link}`);
-        const { articleText, finalUrl } = await retry(() => _getArticleContent({ page, article, logs }), 2, 2000);
-        logs.push(`[Summarize] _getArticleContent finished for ${link}. Text length: ${articleText.length}`);
-
-        const lengthPrompts = {
-            short: "Fasse den Artikel in genau 3 Sätzen zusammen.",
-            medium: "Fasse den Artikel in 5-6 Sätzen zusammen.",
-            long: "Fasse den Artikel in 8-10 Sätzen zusammen."
-        };
-        const summaryPrompt = `${lengthPrompts[length] || lengthPrompts.medium}\n\nArtikel:\n${articleText}`;
-        
-        logs.push(`[Summarize] Calling Gemini for summary of ${link}.`);
-        const summarizedText = await callGemini(summaryPrompt);
-        logs.push(`[Summarize] Gemini summary length: ${summarizedText.length}`);
-
-        db.run(
-            `INSERT INTO articles (link, title, summary, date, cached_at) VALUES (?, ?, ?, ?, datetime('now')) ON CONFLICT(link) DO UPDATE SET summary=excluded.summary, cached_at=datetime('now')`,
-            [finalUrl, article.title, summarizedText, article.pubDate]
-        );
-        logs.push(`[Summarize] Saved summary to DB for ${link}`);
-
-        const result = { ...article, summary: summarizedText, link: finalUrl, logs };
-        logs.push(`[Summarize] Task END for ${link}. Success.`);
-        logs.push(`[Summarize] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
-        return result;
-
-    } catch (error) {
-        logs.push(`[Summarize] ⚠️ Task FAILED for ${link}: ${error.message}`);
-        logs.push(`[Summarize] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
-        throw error;
-    }
-};
-
-module.exports = { summarizeArticleTask, getContentTask, _getArticleContent };
+module.exports = { getContentTask, _getArticleContent };

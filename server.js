@@ -11,11 +11,12 @@ const path = require('path');
 const fetch = require('node-fetch');
 const { default: axios } = require('axios');
 const cheerio = require('cheerio');
-const { summarizeArticleTask, getContentTask } = require('./task.js');
-const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic } = require('./database.js');
+const { getContentTask } = require('./task.js');
+const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, updateArticleSummary } = require('./database.js');
 const { retry, callGemini } = require('./utils.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
+const { randomUUID } = require('crypto');
 
 // Apply the StealthPlugin to Puppeteer
 puppeteer.use(StealthPlugin());
@@ -36,7 +37,7 @@ async function initializeCluster() {
             puppeteer: puppeteer,
             puppeteerOptions: {
                 headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox']
+                args: ['--no-sandbox', '--disable-setuid-sandbox', '--log-level=3']
             },
             timeout: 120000 // Increased timeout for potentially long tasks
         });
@@ -50,15 +51,6 @@ async function initializeCluster() {
                     req.abort();
                 } else {
                     req.continue();
-                }
-            });
-
-            page.on('console', msg => {
-                if (msg.type() === 'error' && msg.text().includes('Could not parse CSS stylesheet')) {
-                    // Suppress this specific error
-                } else {
-                    // In a real app, you might want to log these to a file instead of stdout
-                    // console.log(`[PAGE CONSOLE] ${msg.type()}: ${msg.text()}`);
                 }
             });
 
@@ -165,9 +157,6 @@ async function main() {
         }
     });
     
-    // NOTE: This endpoint is a long-running, synchronous task that can be a performance bottleneck.
-    // In a production environment, this should be refactored into an asynchronous job queue
-    // where the client polls for the result.
     app.get("/api/rss", isAuthenticated, async (req, res) => {
         if (!isClusterReady) {
             return res.status(503).json({ error: "The search service is starting up. Please try again in a moment." });
@@ -208,89 +197,50 @@ async function main() {
             );
             const articlesWithContentResults = await Promise.allSettled(contentPromises);
 
-            //--[ NEW DEBUG LOGGING ]--
-            console.log("\n--- DETAILED TASK LOGS ---");
-            articlesWithContentResults.forEach((result, index) => {
-                console.log(`\n[Article ${index + 1}] ${articlesToCheck[index].link}`);
-                if (result.status === 'fulfilled' && result.value) {
-                    (result.value.logs || []).forEach(log => console.log(`  > ${log}`));
-                    if(result.value.error) {
-                        console.log(`  > ❗ Task returned an error: ${result.value.error}`);
-                    }
-                } else if (result.status === 'rejected') {
-                    console.log(`  > ❗❗ Task promise rejected: ${result.reason}`);
-                }
-            });
-            console.log("--- END DETAILED TASK LOGS ---\
-");
-            //--[ END NEW DEBUG LOGGING ]--
-
             const articlesWithContent = articlesWithContentResults
                 .filter(result => result.status === 'fulfilled' && result.value && !result.value.error)
                 .map(result => result.value);
             
             console.log(`[Content Fetch] Successfully got content for ${articlesWithContent.length} articles.`);
 
-            // Step 3: Perform semantic filtering on articles that have content
-            const semanticallyMatchedArticles = [];
-            console.log(`[Semantic Filter] Filtering ${articlesWithContent.length} articles...`);
+            // Step 3: Create a job and store articles
+            const jobId = randomUUID();
+            await createJob(jobId, req.session.userId);
+            await addArticlesToJob(jobId, articlesWithContent.map(article => ({
+                link: article.link,
+                title: article.title,
+                content: article.articleText
+            })));
 
-            for (const article of articlesWithContent) {
-                const prompt = `
-                    You are a research assistant. Your task is to determine if an article is relevant to a user's specific interests.
+            console.log(`[Job] Created job ${jobId} with ${articlesWithContent.length} articles.`);
 
-                    User's interests:
-                    - General Topic: "${userTopic.main_topic}"
-                    - Must Include Themes: "${userTopic.include_keywords || 'N/A'}"
-                    - Must Exclude Themes: "${userTopic.exclude_keywords || 'None'}"
-
-                    Article Snippet:
-                    ---
-                    ${article.articleText.substring(0, 8000)}
-                    ---
-
-                    Instructions:
-                    1. Analyze if the article snippet is primarily about the "General Topic".
-                    2. If "Must Include Themes" is not 'N/A', analyze if the article's content is clearly relevant to them.
-                    3. Analyze if the article contains any of the "Must Exclude Themes".
-                    4. Based on this, decide if the article is relevant. It is only relevant if it matches the "Must Include" criteria (if applicable) AND does not contain any "Must Exclude" criteria.
-                    5. Respond in a valid JSON format with no other text or markdown: {"is_relevant": boolean, "reason": "A brief analysis of your decision."}
-                `;
-
-                try {
-                    const decisionString = await callGemini(prompt);
-                    const jsonMatch = decisionString.match(/\{.*\}/);
-                    if (jsonMatch) {
-                        const decision = JSON.parse(jsonMatch[0]);
-                        console.log(`[Semantic Filter] AI decision for ${article.link}: ${decision.is_relevant}. Reason: ${decision.reason}`);
-                        if (decision.is_relevant === true) {
-                            // Don't send the full articleText to the client
-                            const { articleText, ...articleWithoutText } = article;
-                            semanticallyMatchedArticles.push(articleWithoutText);
-                        }
-                    } else {
-                        console.error(`[Semantic Filter] ⚠️ No JSON object found in AI response for ${article.link}.`);
-                    }
-                } catch (e) {
-                    console.error(`[Semantic Filter] ⚠️ Could not process AI response for ${article.link}. Error: ${e.message}`);
-                }
-            }
-
-            console.log(`[Semantic Filter] Matched ${semanticallyMatchedArticles.length} articles.`);
-
-            if (semanticallyMatchedArticles.length === 0) {
-                 return res.status(404).json({ error: "No articles found that match your specific criteria after filtering." });
-            }
-            
-            // Step 4: Sort by newest first
-            semanticallyMatchedArticles.sort((a, b) => new Date(b.isoDate) - new Date(a.isoDate));
-
-            // Step 5: Respond
-            res.json(semanticallyMatchedArticles);
+            res.status(202).json({ jobId });
 
         } catch (err) {
             console.error('[Search] Error in /api/rss:', err);
             res.status(500).json({ error: err.message || "Error during article search" });
+        }
+    });
+
+    app.get("/api/results/:jobId", isAuthenticated, async (req, res) => {
+        const { jobId } = req.params;
+        try {
+            const job = await getJob(jobId);
+            if (!job) {
+                return res.status(404).json({ error: "Job not found" });
+            }
+
+            if (job.status === 'completed') {
+                const articles = await getJobArticles(jobId);
+                const semanticallyMatchedArticles = articles.filter(article => article.summary);
+                semanticallyMatchedArticles.sort((a, b) => new Date(b.isoDate) - new Date(a.isoDate));
+                res.json({ status: 'completed', articles: semanticallyMatchedArticles });
+            } else {
+                res.json({ status: job.status, progress: job.progress });
+            }
+        } catch (err) {
+            console.error(`[Results] Error fetching results for job ${jobId}:`, err);
+            res.status(500).json({ error: "Error fetching job results" });
         }
     });
 
@@ -370,7 +320,7 @@ async function main() {
     });
 
     app.get('/personalization', (req, res) => {
-        res.set('Cache-Control', 'no-store');
+        res.set('Cache-control', 'no-store');
         res.sendFile(path.join(__dirname, 'public', 'personalization.html'));
     });
     
@@ -421,7 +371,7 @@ async function extractRealUrl(googleRssUrl) {
             console.error("Error extracting the real URL, retrying:", e.message);
             if (e.response) console.error(`Status: ${e.response.status}, Data: ${String(e.response.data).slice(0, 100)}...`);
             throw e; 
-        }
+        } 
     }).catch(err => {
         console.error("Error extracting the real URL after multiple attempts:", err.message);
         return googleRssUrl;
