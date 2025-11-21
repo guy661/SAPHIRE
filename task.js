@@ -49,7 +49,7 @@ async function _getArticleContent({ page, article, logs }) {
     const link = article.link;
     logs.push(`[_getArticleContent] Starting for: ${link}`);
 
-    let articleText;
+
     let finalUrl = link;
 
     try {
@@ -68,12 +68,16 @@ async function _getArticleContent({ page, article, logs }) {
         const reader = new Readability(doc.window.document);
         const readableArticle = reader.parse();
 
-        if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
-            logs.push(`[Fast Path] ✅ Success for ${finalUrl}`);
-            articleText = readableArticle.textContent;
-        } else {
-            throw new Error('Readable content too short or parsing failed.');
+        const articleText = await page.evaluate(() => {
+            const reader = new Readability(document);
+            return reader.parse()?.textContent || "";
+        });
+
+        if (!articleText) {
+            logs.push(`[Fast Path] ❌ Content extraction failed: articleText is empty for ${link}`);
+            throw new Error(`Content extraction failed for ${link}`);
         }
+        logs.push(`[Fast Path] ✅ Success for ${finalUrl}`);
     } catch (fastPathError) {
         logs.push(`[Fast Path] ❌ Failed: ${fastPathError.message}. Falling back to Puppeteer.`);
         
@@ -84,7 +88,8 @@ async function _getArticleContent({ page, article, logs }) {
                 else req.continue();
             });
 
-            await page.goto(link, { waitUntil: "domcontentloaded", timeout: 20000 });
+            await page.goto(link, { waitUntil: "networkidle2", timeout: 30000 });
+            await page.waitForTimeout(1000); // Wait for 1 second after navigation
             finalUrl = page.url();
 
             try {
@@ -103,15 +108,10 @@ async function _getArticleContent({ page, article, logs }) {
             const isPaywalled = await page.evaluate(() => document.querySelector('[id*="paywall"], [class*="paywall"], [id*="meter"]'));
             if(isPaywalled) throw new Error("Paywall detected.");
 
-            const bodyHtml = await page.content();
-            const doc = new JSDOM(bodyHtml, { url: finalUrl });
-            const reader = new Readability(doc.window.document);
-            const readableArticle = reader.parse();
-            
-            if (!readableArticle || readableArticle.textContent.length < 250) {
-                throw new Error("Puppeteer Readability check failed or content too short.");
-            }
-            articleText = readableArticle.textContent;
+            const articleText = await page.evaluate(() => {
+                const reader = new Readability(document);
+                return reader.parse()?.textContent || "";
+            });
             if (!articleText) {
                 logs.push(`[Slow Path] ❌ Content extraction failed: articleText is empty for ${link}`);
                 throw new Error(`Content extraction failed for ${link}`);
@@ -134,7 +134,7 @@ const getContentTask = async ({ page, data: { article } }) => {
     const logs = [];
     try {
         logs.push(`[getContentTask] Starting for ${article.link}`);
-        const { articleText, finalUrl } = await _getArticleContent({ page, article, logs });
+        const { articleText, finalUrl } = await retry(() => _getArticleContent({ page, article, logs }), 2, 2000);
         logs.push(`[getContentTask] Success for ${article.link}`);
         return { ...article, articleText, link: finalUrl, logs };
     } catch (error) {
@@ -162,7 +162,7 @@ const summarizeArticleTask = async ({ page, data: { article, length } }) => {
     logs.push(`[Cache] ❌ MISS for summary: ${link}`);
 
     try {
-        const { articleText, finalUrl } = await _getArticleContent({ page, article, logs });
+        const { articleText, finalUrl } = await retry(() => _getArticleContent({ page, article, logs }), 2, 2000);
 
         const lengthPrompts = {
             short: "Fasse den Artikel in genau 3 Sätzen zusammen.",
