@@ -1,44 +1,8 @@
 require('dotenv').config();
-const fetch = require('node-fetch');
 const { JSDOM } = require('jsdom');
 const { Readability } = require('@mozilla/readability');
 const { db } = require('./database.js');
-
-// This file was temporarily emptied and is now being restored.
-
-// =================================================================
-// SECTION: Helper Utilities (copied from server.js)
-// =================================================================
-
-async function retry(fn, retries = 3, delay = 1000) {
-    try {
-        return await fn();
-    } catch (err) {
-        if (retries > 0) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return retry(fn, retries - 1, delay * 2);
-        }
-        throw err;
-    }
-}
-
-async function callGemini(prompt) {
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
-    const response = await fetch(geminiApiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        signal: controller.signal
-    }).finally(() => clearTimeout(id));
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API Error: ${response.status} - ${errorText}`);
-    }
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-}
+const { retry, callGemini } = require('./utils.js');
 
 
 // =================================================================
@@ -129,19 +93,13 @@ async function _getArticleContent({ page, article, logs }) {
                 logs.push(`[getArticleContent] Slow Path: No paywall detected.`);
             }
 
-            articleText = await page.evaluate(() => {
-                // This Readability script needs to be injected if not already present on the page.
-                // Assuming it might not be, this could fail. For now, we proceed as requested.
-                try {
-                    const reader = new Readability(document.cloneNode(true));
-                    return reader.parse()?.textContent || "";
-                } catch(e) {
-                    // If Readability is not defined.
-                    return document.body.innerText;
-                }
-            });
-
-            if (articleText) {
+            const bodyHtml = await page.content();
+            const doc = new JSDOM(bodyHtml, { url: finalUrl });
+            const reader = new Readability(doc.window.document);
+            const readableArticle = reader.parse();
+            
+            if (readableArticle && readableArticle.textContent) {
+                articleText = readableArticle.textContent;
                 logs.push(`[getArticleContent] Slow Path extracted text length: ${articleText.length}`);
             } else {
                  logs.push(`[getArticleContent] ❌ Slow Path: Content extraction failed (articleText is empty).`);

@@ -13,6 +13,7 @@ const { default: axios } = require('axios');
 const cheerio = require('cheerio');
 const { summarizeArticleTask, getContentTask } = require('./task.js');
 const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic } = require('./database.js');
+const { retry, callGemini } = require('./utils.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 
@@ -22,45 +23,6 @@ puppeteer.use(StealthPlugin());
 // Session configuration
 const SESS_SECRET = process.env.SESS_SECRET || 'your-default-secret';
 const IN_PROD = process.env.NODE_ENV === 'production';
-
-
-
-
-async function retry(fn, retries = 3, delay = 1000) {
-    try {
-        
-        return await fn();
-    } catch (err) {
-        
-        if (retries > 0) {
-            console.log(`Retrying... attempts left: ${retries}`);
-            
-            await new Promise(resolve => setTimeout(resolve, delay));
-            
-            return retry(fn, retries - 1, delay * 2);
-        }
-        
-        throw err;
-    }
-}
-
-async function callGemini(prompt) {
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
-    const response = await fetch(geminiApiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        signal: controller.signal
-    }).finally(() => clearTimeout(id));
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API Fehler: ${response.status} - ${errorText}`);
-    }
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
-}
 
 let cluster;
 let isClusterReady = false;
@@ -171,6 +133,9 @@ async function main() {
         }
     });
     
+    // NOTE: This endpoint is a long-running, synchronous task that can be a performance bottleneck.
+    // In a production environment, this should be refactored into an asynchronous job queue
+    // where the client polls for the result.
     app.get("/api/rss", isAuthenticated, async (req, res) => {
         if (!isClusterReady) {
             return res.status(503).json({ error: "The search service is starting up. Please try again in a moment." });
@@ -414,6 +379,8 @@ async function retry(fn, retries = 3, delay = 1000) {
 }
 
 
+// NOTE: This function is brittle as it relies on reverse-engineered logic from Google News' internal API.
+// It is prone to breaking if Google changes its frontend implementation.
 async function extractRealUrl(googleRssUrl) {
     return retry(async () => {
         try {
