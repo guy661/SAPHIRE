@@ -19,7 +19,7 @@ async function _getArticleContent({ page, article, logs }) {
 
     // Set up request interception to block images, fonts, and media
     await page.setRequestInterception(true);
-    if (!page.listeners('request').length) {
+    if (page.listenerCount('request') === 0) {
         page.on('request', (req) => {
             if (['image', 'font', 'media'].includes(req.resourceType())) req.abort();
             else req.continue();
