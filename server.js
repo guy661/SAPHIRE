@@ -32,8 +32,8 @@ async function initializeCluster() {
     try {
         console.log('[Server] Initializing Puppeteer cluster in the background...');
         cluster = await Cluster.launch({
-            concurrency: Cluster.CONCURRENCY_PAGE,
-            maxConcurrency: 4, // Lowered concurrency to reduce resource load during semantic check
+            concurrency: Cluster.CONCURRENCY_CONTEXT,
+            maxConcurrency: 2, // Lowered concurrency to reduce resource load during semantic check
             puppeteer: puppeteer,
             puppeteerOptions: {
                 headless: true,
@@ -197,6 +197,14 @@ async function main() {
             );
             const articlesWithContentResults = await Promise.allSettled(contentPromises);
 
+            articlesWithContentResults.forEach((result, i) => {
+                if (result.status === 'rejected') {
+                    console.log(`[Content Fetch] ❌ Task for article ${articlesWithRealLinks[i].link} rejected:`, result.reason?.message);
+                } else if (result.value.error) {
+                    console.log(`[Content Fetch] ⚠️ Task for article ${articlesWithRealLinks[i].link} failed:`, result.value.error);
+                }
+            });
+
             const articlesWithContent = articlesWithContentResults
                 .filter(result => result.status === 'fulfilled' && result.value && !result.value.error)
                 .map(result => result.value);
@@ -271,6 +279,7 @@ async function main() {
     });
     
     app.post("/api/summarize", isAuthenticated, async (req, res) => {
+        console.log('[API /summarize] Received request. Session:', req.session, 'Body:', req.body);
         if (!isClusterReady) {
             return res.status(503).json({ error: "The summary service is starting up. Please try again in a moment." });
         }
