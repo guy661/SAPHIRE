@@ -12,7 +12,7 @@ const fetch = require('node-fetch');
 const { default: axios } = require('axios');
 const cheerio = require('cheerio');
 const { getContentTask, summarizeArticleTask, semanticCheckTask } = require('./task.js');
-const { processInBatches } = require('./utils.js');
+const { processInBatches, callGemini } = require('./utils.js');
 const db = require('./database.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
@@ -307,114 +307,122 @@ async function initializeCluster() {
             
 
                 app.get("/api/rss", isAuthenticated, async (req, res) => {
-
                     console.log(`[Server] /api/rss route started for user ${req.session.userId}`);
-
                     if (!isClusterReady) {
-
                         return res.status(503).json({ error: "The search service is starting up. Please try again in a moment." });
-
                     }
-
             
-
                     try {
-            const userTopic = await db.getTopicByUserId(req.session.userId);
-            if (!userTopic || !userTopic.main_topic) {
-                return res.status(400).json({ error: "No search topic specified. Please set a topic in your personalization settings." });
-            }
-
-            // Step 1: Broad search for article links
-            const broadQuery = userTopic.main_topic;
-            console.log(`[Search] Performing broad search for: "${broadQuery}"`);
-            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(broadQuery)}&hl=de&gl=DE&ceid=DE:de`;
-            const controller = new AbortController();
-            const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
-            const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(id));
-            if (!response.ok) throw new Error("Could not load RSS feed for broad search");
+                        const userTopic = await db.getTopicByUserId(req.session.userId);
+                        if (!userTopic || !userTopic.main_topic) {
+                            return res.status(400).json({ error: "No search topic specified. Please set a topic in your personalization settings." });
+                        }
             
-            const xml = await response.text();
-            const feed = await parser.parseString(xml);
-            const articlesToCheck = feed.items.slice(0, 20);
-            console.log(`[Search] Found ${articlesToCheck.length} articles.`);
-            // Step 2: Get content for all articles
-            console.log(`[Content Fetch] Getting content for ${articlesToCheck.length} articles...`);
-            const contentPromises = articlesToCheck.map(article => 
-                cluster.execute({ taskFunction: getContentTask, taskData: { article } })
-            );
-            const articlesWithContentResults = await Promise.allSettled(contentPromises);
-            const articlesWithContent = articlesWithContentResults
-                .filter(result => result.status === 'fulfilled' && result.value && !result.value.error)
-                .map(result => result.value);
-            console.log(`[Content Fetch] Successfully got content for ${articlesWithContent.length} articles.`);
-
-            // Step 3: Perform semantic check on articles with content
-            console.log(`[Semantic Check] Performing semantic check for ${articlesWithContent.length} articles.`);
-            const semanticCheckResults = await processInBatches(
-                articlesWithContent,
-                (article) => semanticCheckTask({ data: { article, userTopic } }),
-                8, // Batch size
-                65000 // Delay in ms (65 seconds)
-            );
+                        // Set defaults for new personalization options if they don't exist
+                        const summaryLength = userTopic.summary_length || 'default';
+                        const summaryType = userTopic.summary_type || 'individual';
             
-            const semanticallyRelevantArticles = semanticCheckResults
-                .filter(result => result.status === 'fulfilled' && result.value?.is_relevant)
-                .map(result => result.value);
-            console.log(`[Semantic Check] Found ${semanticallyRelevantArticles.length} semantically relevant articles.`);
+                        // Step 1: Broad search for article links
+                        const broadQuery = userTopic.main_topic;
+                        console.log(`[Search] Performing broad search for: "${broadQuery}"`);
+                        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(broadQuery)}&hl=de&gl=DE&ceid=DE:de`;
+                        const controller = new AbortController();
+                        const id = setTimeout(() => controller.abort(), 15000);
+                        const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(id));
+                        if (!response.ok) throw new Error("Could not load RSS feed for broad search");
+                        
+                        const xml = await response.text();
+                        const feed = await parser.parseString(xml);
+                        const articlesToCheck = feed.items.slice(0, 20);
+                        console.log(`[Search] Found ${articlesToCheck.length} articles.`);
             
-            // Log the reasoning for the chosen articles
-            semanticallyRelevantArticles.forEach(article => {
-                console.log(`[Semantic Check] AI reasoning for "${article.title}": ${article.reason}`);
-            });
-
-            // Step 4: Summarize the relevant articles
-            console.log(`[Summarization] Summarizing ${semanticallyRelevantArticles.length} relevant articles...`);
-            const summaryResults = await processInBatches(
-                semanticallyRelevantArticles,
-                (article) => summarizeArticleTask({ data: { article } }),
-                8, // Batch size
-                65000 // Delay in ms
-            );
-            const articlesWithSummaries = summaryResults
-                .filter(result => result.status === 'fulfilled' && result.value)
-                .map(result => result.value)
-                .map(article => {
-                    const originalArticle = semanticallyRelevantArticles.find(a => a.link === article.link);
-                    return { ...article, reason: originalArticle.reason };
-                });
-
-            console.log(`[Summarization] Successfully summarized ${articlesWithSummaries.length} articles.`);
-
-            // Step 5: Create a job and store the relevant articles with summaries
-            if (articlesWithSummaries.length === 0) {
-                console.log(`[Job] No relevant articles found for job.`);
-                return res.status(200).json({ jobId: null, message: "No relevant articles found for your topic." });
-            }
-
-            const jobId = randomUUID();
-            await db.createJob(jobId, req.session.userId);
-            await db.addArticlesToJob(jobId, articlesWithSummaries.map(article => ({
-                link: article.link,
-                title: article.title,
-                content: article.articleText,
-                summary: article.summary,
-                reason: article.reason
-            })));
-
-            // Mark job as completed immediately
-            await db.updateJobStatus(jobId, 'completed');
-
-            console.log(`[Job] Created job ${jobId} with ${articlesWithSummaries.length} relevant articles and marked as completed.`);
-
-            res.status(202).json({ jobId });
-
-        } catch (err) {
-            console.error('[Search] Error in /api/rss:', err);
-            res.status(500).json({ error: err.message || "Error during article search" });
-        }
-
+                        // Step 2: Get content for all articles
+                        console.log(`[Content Fetch] Getting content for ${articlesToCheck.length} articles...`);
+                        const contentPromises = articlesToCheck.map(article => 
+                            cluster.execute({ taskFunction: getContentTask, taskData: { article } })
+                        );
+                        const articlesWithContentResults = await Promise.allSettled(contentPromises);
+                        const articlesWithContent = articlesWithContentResults
+                            .filter(result => result.status === 'fulfilled' && result.value && !result.value.error)
+                            .map(result => result.value);
+                        console.log(`[Content Fetch] Successfully got content for ${articlesWithContent.length} articles.`);
+            
+                        // Step 3: Perform semantic check on articles with content
+                        console.log(`[Semantic Check] Performing semantic check for ${articlesWithContent.length} articles.`);
+                        const semanticCheckResults = await processInBatches(
+                            articlesWithContent,
+                            (article) => semanticCheckTask({ data: { article, userTopic } }),
+                            8, 65000
+                        );
+                        const semanticallyRelevantArticles = semanticCheckResults
+                            .filter(result => result.status === 'fulfilled' && result.value?.is_relevant)
+                            .map(result => result.value);
+                        console.log(`[Semantic Check] Found ${semanticallyRelevantArticles.length} semantically relevant articles.`);
+                        semanticallyRelevantArticles.forEach(article => {
+                            console.log(`[Semantic Check] AI reasoning for "${article.title}": ${article.reason}`);
+                        });
+            
+                        // Step 4: Summarize the relevant articles
+                        console.log(`[Summarization] Summarizing ${semanticallyRelevantArticles.length} relevant articles with length '${summaryLength}'...`);
+                        const summaryResults = await processInBatches(
+                            semanticallyRelevantArticles,
+                            (article) => summarizeArticleTask({ data: { article, length: summaryLength } }),
+                            8, 65000
+                        );
+                        const articlesWithSummaries = summaryResults
+                            .filter(result => result.status === 'fulfilled' && result.value)
+                            .map(result => result.value)
+                            .map(article => {
+                                const originalArticle = semanticallyRelevantArticles.find(a => a.link === article.link);
+                                return { ...article, reason: originalArticle.reason };
+                            });
+                        console.log(`[Summarization] Successfully summarized ${articlesWithSummaries.length} articles.`);
+            
+                        // Step 5: Create a job and store the results based on summaryType
+                        if (articlesWithSummaries.length === 0) {
+                            console.log(`[Job] No relevant articles found for job.`);
+                            return res.status(200).json({ jobId: null, message: "No relevant articles found for your topic." });
+                        }
+            
+                        const jobId = randomUUID();
+                        await db.createJob(jobId, req.session.userId);
+            
+                        if (summaryType === 'meta' && articlesWithSummaries.length > 1) {
+                            console.log(`[Job] Generating meta summary for job ${jobId}.`);
+                            const metaSummaryPrompt = `Fasse diese ${articlesWithSummaries.length} Zusammenfassungen in einem kurzen Absatz zusammen (maximal 4 Sätze), der die wichtigsten gemeinsamen Themen oder Schlussfolgerungen hervorhebt:\n\n` + articlesWithSummaries.map((s, i) => `Zusammenfassung ${i+1}:\n${s.summary}`).join('\n\n');
+                            const metaSummary = await callGemini(metaSummaryPrompt);
+                            
+                            await db.addArticlesToJob(jobId, [{
+                                link: '#meta-summary',
+                                title: `Meta Summary for "${userTopic.main_topic}"`,
+                                content: articlesWithSummaries.map(a => `Title: ${a.title}\nSummary: ${a.summary}`).join('\n\n---\n\n'),
+                                summary: metaSummary,
+                                reason: `Meta summary generated from ${articlesWithSummaries.length} relevant articles.`
+                            }]);
+                        } else {
+                            console.log(`[Job] Storing ${articlesWithSummaries.length} individual articles for job ${jobId}.`);
+                            await db.addArticlesToJob(jobId, articlesWithSummaries.map(article => ({
+                                link: article.link,
+                                title: article.title,
+                                content: article.articleText,
+                                summary: article.summary,
+                                reason: article.reason
+                            })));
+                        }
+            
+                        // Mark job as completed immediately
+                        await db.updateJobStatus(jobId, 'completed');
+            
+                        console.log(`[Job] Created job ${jobId} and marked as completed.`);
+            
+                        res.status(202).json({ jobId });
+            
+                    } catch (err) {
+                        console.error('[Search] Error in /api/rss:', err);
+                        res.status(500).json({ error: err.message || "Error during article search" });
+                    }
+            
                     console.log(`[Server] /api/rss route finished for user ${req.session.userId}`);
-
                 });
 
             app.get("/api/results/:jobId", isAuthenticated, async (req, res) => {
@@ -473,33 +481,21 @@ async function initializeCluster() {
         
 
             app.post('/api/topics', isAuthenticated, async (req, res) => {
-
-                const { main_topic, include_keywords, exclude_keywords } = req.body;
-
+                const { main_topic, include_keywords, exclude_keywords, summary_type, summary_length } = req.body;
                 if (!main_topic) return res.status(400).json({ error: 'Main topic is required' });
-
                 try {
-
                     await db.upsertTopic(req.session.userId, {
-
                         main_topic,
-
                         include_keywords: include_keywords || '',
-
-                        exclude_keywords: exclude_keywords || ''
-
+                        exclude_keywords: exclude_keywords || '',
+                        summary_type: summary_type || 'individual',
+                        summary_length: summary_length || 'default',
                     });
-
                     res.status(200).json({ message: 'Topic saved successfully' });
-
                 } catch (error) {
-
                     console.error('Error saving topic:', error);
-
                     res.status(500).json({ error: 'Failed to save topic' });
-
                 }
-
             });
 
             
@@ -624,13 +620,39 @@ async function initializeCluster() {
 
         
 
-            app.get('/personalization', (req, res) => {
+                        app.get('/personalization', (req, res) => {
 
-                res.set('Cache-control', 'no-store');
+        
 
-                res.sendFile(path.join(__dirname, 'public', 'personalization.html'));
+                            res.set('Cache-control', 'no-store');
 
-            });
+        
+
+                            res.sendFile(path.join(__dirname, 'public', 'personalization.html'));
+
+        
+
+                        });
+
+        
+
+            
+
+        
+
+                        app.get('/personalization/topic', (req, res) => {
+
+        
+
+                            res.set('Cache-control', 'no-store');
+
+        
+
+                            res.sendFile(path.join(__dirname, 'public', 'personalization-topic.html'));
+
+        
+
+                        });
 
             
 

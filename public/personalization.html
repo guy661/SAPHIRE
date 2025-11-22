@@ -11,6 +11,44 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     
     <link rel="stylesheet" href="style.css">
+    <style>
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin-top: 2rem;
+        }
+        .setting-card {
+            background-color: var(--color-background-secondary);
+            border-radius: var(--rounded-lg);
+            padding: 1.5rem;
+            text-decoration: none;
+            color: var(--color-text-primary);
+            transition: all 0.2s ease-in-out;
+            border: 1px solid var(--color-border);
+        }
+        .setting-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.1);
+            border-color: var(--color-primary);
+        }
+        .setting-card-title {
+            font-size: var(--fs-lg);
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .setting-card-title i {
+            font-size: 1.2em;
+            color: var(--color-primary);
+        }
+        .setting-card-description {
+            font-size: var(--fs-sm);
+            color: var(--color-text-secondary);
+            margin-top: 0.5rem;
+        }
+    </style>
 </head>
 <body>
 
@@ -18,44 +56,50 @@
         <nav class="navbar">
             <span class="navbar-brand">SYNAPSE</span>
             <div>
-                <a href="/" class="btn-ghost">Back to Dashboard</a>
+                <a href="/" class="btn-ghost">« Back to Dashboard</a>
                 <span class="navbar-text" style="margin-left: 1rem;">User: <strong id="username-display"></strong></span>
                 <button id="logoutBtn" class="btn btn-outline-danger btn-sm">Logout</button>
             </div>
         </nav>
 
         <main>
-            <div class="card-ui" style="max-width: 600px; margin: 2rem auto;">
-                <h1 class="card-ui-title" style="text-align: left;">Personalize Your News</h1>
+            <div class="card-ui" style="max-width: 800px; margin: 2rem auto;">
+                <h1 class="card-ui-title" style="text-align: left;">Personalization</h1>
                 <p class="card-ui-subtitle" style="text-align: left;">
-                    Stellen Sie hier Ihr persönliches Nachrichtenthema ein. Dies wird für die automatische Erstellung Ihrer Zusammenfassungen verwendet.
+                    Verbessern Sie Ihr Nachrichtenerlebnis, indem Sie die folgenden Einstellungen anpassen.
                 </p>
 
-                <div id="alert-container" class="mt-3" style="display: none;"></div>
+                <div id="alert-container" style="display: none; margin-top: 1rem;"></div>
 
-                <form id="topicForm">
-                    <div class="mb-3">
-                        <label for="main_topic" class="form-label">Über was möchtest du dich in diesem dashboard informiern lassen?</label>
-                        <input type="text" class="form-control" id="main_topic" placeholder="z.B. Künstliche Intelligenz" required>
-                    </div>
-                    <div class="mb-3">
-                        <label for="include_keywords" class="form-label">Erzwinge diese Schlüsselwörter (optional, mit Komma trennen)</label>
-                        <input type="text" class="form-control" id="include_keywords" placeholder="z.B. GPT-4, LLMs, Bildgenerierung">
-                        <small class="form-text text-muted" style="color: var(--color-text-secondary); font-size: var(--fs-sm);">
-                            Nachrichten müssen mindestens eines dieser Wörter enthalten.
-                        </small>
-                    </div>
-                    <div class="mb-4">
-                        <label for="exclude_keywords" class="form-label">Schließe diese Schlüsselwörter aus (optional, mit Komma trennen)</label>
-                        <input type="text" class="form-control" id="exclude_keywords" placeholder="z.B. Aktien, Klatsch, Sport">
-                         <small class="form-text text-muted" style="color: var(--color-text-secondary); font-size: var(--fs-sm);">
-                            Nachrichten, die diese Wörter enthalten, werden ignoriert.
-                        </small>
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Preferences</button>
-                </form>
-                <div class="mt-4">
-                    <button id="clearDbBtn" class="btn btn-danger w-100">Clear Database</button>
+                <div class="settings-grid">
+                    <a href="/personalization/topic" class="setting-card">
+                        <div class="setting-card-title">
+                            <i class="bi bi-tags-fill"></i>
+                            <span>Topic & Keywords</span>
+                        </div>
+                        <p class="setting-card-description">
+                            Definieren Sie das Hauptthema und die Schlüsselwörter für Ihre Nachrichtensuche.
+                        </p>
+                    </a>
+                    <a href="/personalization/summary" class="setting-card">
+                        <div class="setting-card-title">
+                            <i class="bi bi-card-text"></i>
+                            <span>Summary Settings</span>
+                        </div>
+                        <p class="setting-card-description">
+                            Passen Sie die Länge und das Format Ihrer Artikelzusammenfassungen an.
+                        </p>
+                    </a>
+                </div>
+                
+                <div class="mt-5 border-top pt-4">
+                     <h2 class="h5 mb-3">Advanced Settings</h2>
+                    <button id="clearDbBtn" class="btn btn-danger">
+                        <i class="bi bi-trash"></i> Clear Entire Database
+                    </button>
+                    <small class="d-block mt-2 text-muted">
+                        This will permanently delete all users, topics, and job data.
+                    </small>
                 </div>
             </div>
         </main>
@@ -65,12 +109,8 @@
         document.addEventListener('DOMContentLoaded', () => {
             const usernameDisplay = document.getElementById('username-display');
             const logoutBtn = document.getElementById('logoutBtn');
-            const topicForm = document.getElementById('topicForm');
-            const mainTopicInput = document.getElementById('main_topic');
-            const includeKeywordsInput = document.getElementById('include_keywords');
-            const excludeKeywordsInput = document.getElementById('exclude_keywords');
-            const alertContainer = document.getElementById('alert-container');
             const clearDbBtn = document.getElementById('clearDbBtn');
+            const alertContainer = document.getElementById('alert-container');
 
             const api = {
                 async request(endpoint, options = {}) {
@@ -85,12 +125,10 @@
                 },
                 getUser() { return this.request('/user'); },
                 logout() { return this.request('/logout', { method: 'POST' }); },
-                getTopics() { return this.request('/topics'); },
-                saveTopics(data) { return this.request('/topics', { method: 'POST', body: JSON.stringify(data) }); },
                 clearDatabase() { return this.request('/clear-database', { method: 'POST' }); }
             };
 
-            const showAlert = (message, type = 'danger') => {
+             const showAlert = (message, type = 'danger') => {
                 alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
                 alertContainer.style.display = 'block';
                 setTimeout(() => {
@@ -117,43 +155,13 @@
                     }
                 }
             });
-
-            topicForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const data = {
-                    main_topic: mainTopicInput.value.trim(),
-                    include_keywords: includeKeywordsInput.value.trim(),
-                    exclude_keywords: excludeKeywordsInput.value.trim()
-                };
-
-                if (!data.main_topic) {
-                    showAlert('Das Hauptthema ist erforderlich.');
-                    return;
-                }
-
-                try {
-                    const result = await api.saveTopics(data);
-                    showAlert(result.message, 'success');
-                } catch (err) {
-                    showAlert(err.error || 'Failed to save preferences.');
-                }
-            });
-
+            
             const loadData = async () => {
                 try {
                     const user = await api.getUser();
                     usernameDisplay.textContent = user.username;
-                    
-                    const topic = await api.getTopics();
-                    if (topic) {
-                        mainTopicInput.value = topic.main_topic || '';
-                        includeKeywordsInput.value = topic.include_keywords || '';
-                        excludeKeywordsInput.value = topic.exclude_keywords || '';
-                    }
-
                 } catch (err) {
-                    // This will be caught by the 401 redirect in api.request
-                    console.error('Failed to load initial data', err);
+                    console.error('Failed to load user data', err);
                 }
             };
 

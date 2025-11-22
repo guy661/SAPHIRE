@@ -121,6 +121,25 @@ function init() {
                         } else {
                             console.log('Column "reason" added to "job_articles" or already exists.');
                         }
+                    });
+                     // migrations for topics table
+                     db.run("ALTER TABLE topics ADD COLUMN summary_type TEXT DEFAULT 'individual'", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding summary_type column to topics:', err.message);
+                            }
+                        } else {
+                            console.log('Column "summary_type" added to "topics" or already exists.');
+                        }
+                    });
+                    db.run("ALTER TABLE topics ADD COLUMN summary_length TEXT DEFAULT 'default'", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding summary_length column to topics:', err.message);
+                            }
+                        } else {
+                            console.log('Column "summary_length" added to "topics" or already exists.');
+                        }
                         resolve();
                     });
                 });
@@ -304,17 +323,19 @@ function getTopicByUserId(userId) {
     });
 }
 
-function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords }) {
+function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords, summary_type, summary_length }) {
     return new Promise((resolve, reject) => {
         const sql = `
-            INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords, summary_type, summary_length)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 main_topic = excluded.main_topic,
                 include_keywords = excluded.include_keywords,
-                exclude_keywords = excluded.exclude_keywords;
+                exclude_keywords = excluded.exclude_keywords,
+                summary_type = excluded.summary_type,
+                summary_length = excluded.summary_length;
         `;
-        db.run(sql, [userId, main_topic, include_keywords, exclude_keywords], function(err) {
+        db.run(sql, [userId, main_topic, include_keywords, exclude_keywords, summary_type, summary_length], function(err) {
             if (err) {
                 reject(err);
             } else {

@@ -95,7 +95,7 @@ async function _getArticleContent({ page, article, logs }) {
             articleText = readableArticle.textContent;
             title = readableArticle.title;
             logs.push(`[getArticleContent] Fast Path extracted text length: ${articleText.length}`);
-            if (articleText.length < 250) {
+            if (articleText.length < 100) {
                  logs.push(`[getArticleContent] Fast Path content too short, falling back.`);
                  throw new Error('Fast Path content too short.');
             }
@@ -145,7 +145,7 @@ async function _getArticleContent({ page, article, logs }) {
         }
     }
 
-    if (!articleText || articleText.length < 250) {
+    if (!articleText || articleText.length < 100) {
         logs.push(`[getArticleContent] ❌ FINAL CHECK FAILED: Not enough content found for ${link}. Length: ${articleText?.length || 0}`);
         throw new Error(`Not enough content found for ${link} after all attempts.`);
     }
@@ -243,24 +243,40 @@ const semanticCheckTask = async ({ data: { article, userTopic } }) => {
     const logs = [];
     try {
         const prompt = `
-            You are a strict research assistant. Your task is to determine if an article is highly relevant to a user's specific interests, focusing on precision.
+            You are a highly discerning and specialized research assistant, an expert in "${userTopic.main_topic}". Your primary mission is to protect a busy professional from irrelevant articles. You must be extremely strict and prioritize precision over recall.
 
-            User's Interests:
-            - General Topic: "${userTopic.main_topic}"
-            - Must Include Themes: "${userTopic.include_keywords || 'N/A'}"
-            - Must Exclude Themes: "${userTopic.exclude_keywords || 'None'}"
+            The user's specific research focus is:
+            - Core Subject: "${userTopic.main_topic}"
+            - Desired Concepts (Must be the main focus): "${userTopic.include_keywords || 'Any'}"
+            - Forbidden Topics (Must be completely absent): "${userTopic.exclude_keywords || 'None'}"
 
             Article Snippet (first ~8000 characters):
             ---
             ${article.articleText.substring(0, 8000)}
             ---
 
-            **Instructions (Follow Strictly):**
-            1.  **Relevance Check:** The article's primary focus must be the "General Topic".
-            2.  **Inclusion Criteria (Crucial):** If "Must Include Themes" are provided, the article **must be directly and substantively about at least one** of these themes. A brief mention is not sufficient. For example, if the theme is "new models", an article about AI's impact on the job market that only mentions a new model once is **not** relevant. The core of the article must align with the theme.
-            3.  **Exclusion Criteria:** The article must **not** contain any of the "Must Exclude Themes".
-            4.  **Final Decision:** An article is only relevant if it passes the "General Topic" check, the strict "Inclusion Criteria" (if applicable), AND the "Exclusion Criteria". Be conservative; if in doubt, classify the article as not relevant.
-            5.  **Respond in a valid JSON format** with no other text or markdown: {"is_relevant": boolean, "reason": "A brief, direct analysis of your decision, explaining how the article does or does not meet the strict criteria."}
+            **Your Strict Filtering Protocol (Must be followed precisely):**
+
+            1.  **Interpret the User's Intent:** The "Desired Concepts" are not just keywords; they represent conceptual themes.
+                - For example, if a concept is "New Models", you are looking for articles whose central theme is the announcement, analysis, or architecture of new AI models (e.g., GPT-5, Claude 4, etc.). An article that only mentions a new model in passing while discussing a different topic (like AI ethics or market trends) is **irrelevant**.
+                - If a concept is "Image Generation", the article must be *about* the techniques, models, or impact of generating images with AI. An article on a different topic that happens to feature an AI-generated image is **irrelevant**.
+
+            2.  **Primary Filter: Desired Concepts.**
+                - If "Desired Concepts" are specified, the article's **main, central theme** MUST be a deep and substantive exploration of at least one of these concepts. A brief or tangential mention is an immediate disqualification.
+                - If the article is only related to the "Core Subject" but does not focus on the "Desired Concepts", it is **irrelevant**.
+
+            3.  **Secondary Filter: Forbidden Topics.**
+                - The article must not contain any substantive discussion of the "Forbidden Topics". Even a few paragraphs can be enough to disqualify it.
+
+            4.  **Final Judgment:** You must be conservative. If you have any doubt about whether the article is a perfect fit for the user's highly specific focus, you MUST classify it as not relevant. It is better to miss a borderline article than to include an irrelevant one.
+
+            5.  **Deliver Your Verdict:** Respond **only** with a single, valid JSON object. Do not add any other text, explanations, or markdown formatting.
+                - The JSON object must have two keys:
+                  - \`"is_relevant"\`: \`true\` or \`false\`.
+                  - \`"reason"\`: A concise, one-sentence explanation for your decision based on the protocol above. Start your reason with "Relevant because..." or "Irrelevant because...".
+                
+                Example Response:
+                {"is_relevant": false, "reason": "Irrelevant because the article's main focus is AI ethics and only briefly mentions a new model, which does not meet the user's requirement for a deep dive into 'New Models'."}
         `;
         logs.push(`[Semantic Check] Prompt created for ${article.link}.`);
 
