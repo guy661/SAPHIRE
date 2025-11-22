@@ -1,7 +1,7 @@
 require('dotenv').config();
 const fetch = require('node-fetch');
 
-async function retry(fn, retries = 3, delay = 1000) {
+async function retry(fn, retries = 5, delay = 1000) {
     try {
         return await fn();
     } catch (err) {
@@ -31,4 +31,22 @@ async function callGemini(prompt) {
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
 }
 
-module.exports = { retry, callGemini };
+async function processInBatches(items, taskFn, batchSize, delay) {
+    let results = [];
+    for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize);
+        console.log(`[Batch] Processing batch of ${batch.length} items...`);
+        
+        const promises = batch.map(item => taskFn(item));
+        const batchResults = await Promise.allSettled(promises);
+        results = results.concat(batchResults);
+
+        if (i + batchSize < items.length) {
+            console.log(`[Batch] Waiting ${delay / 1000} seconds before next batch...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+    return results;
+}
+
+module.exports = { retry, callGemini, processInBatches };
