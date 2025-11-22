@@ -54,6 +54,9 @@
                     </div>
                     <button type="submit" class="btn btn-primary w-100">Save Preferences</button>
                 </form>
+                <div class="mt-4">
+                    <button id="clearDbBtn" class="btn btn-danger w-100">Clear Database</button>
+                </div>
             </div>
         </main>
     </div>
@@ -67,6 +70,7 @@
             const includeKeywordsInput = document.getElementById('include_keywords');
             const excludeKeywordsInput = document.getElementById('exclude_keywords');
             const alertContainer = document.getElementById('alert-container');
+            const clearDbBtn = document.getElementById('clearDbBtn');
 
             const api = {
                 async request(endpoint, options = {}) {
@@ -82,7 +86,8 @@
                 getUser() { return this.request('/user'); },
                 logout() { return this.request('/logout', { method: 'POST' }); },
                 getTopics() { return this.request('/topics'); },
-                saveTopics(data) { return this.request('/topics', { method: 'POST', body: JSON.stringify(data) }); }
+                saveTopics(data) { return this.request('/topics', { method: 'POST', body: JSON.stringify(data) }); },
+                clearDatabase() { return this.request('/clear-database', { method: 'POST' }); }
             };
 
             const showAlert = (message, type = 'danger') => {
@@ -99,6 +104,17 @@
                     window.location.href = '/';
                 } catch (err) {
                     console.error('Logout failed', err);
+                }
+            });
+
+            clearDbBtn.addEventListener('click', async () => {
+                if (confirm('Are you sure you want to clear the entire database? This action cannot be undone.')) {
+                    try {
+                        const result = await api.clearDatabase();
+                        showAlert(result.message, 'success');
+                    } catch (err) {
+                        showAlert(err.error || 'Failed to clear database.');
+                    }
                 }
             });
 

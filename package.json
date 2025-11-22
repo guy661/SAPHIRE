@@ -5,8 +5,7 @@
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js",
-    "worker": "node worker.js"
+    "start": "node server.js"
   },
   "keywords": [],
   "author": "",
@@ -22,7 +21,6 @@
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
     "express-session": "^1.18.2",
-    "fs": "^0.0.1-security",
     "jsdom": "^27.2.0",
     "node-fetch": "^2.7.0",
     "puppeteer": "^24.30.0",

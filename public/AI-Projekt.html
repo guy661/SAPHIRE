@@ -130,10 +130,11 @@
                 },
                 login(u, p) { return this.request('/login', { method: 'POST', body: JSON.stringify({ username: u, password: p }) }); },
                 register(u, p) { return this.request('/register', { method: 'POST', body: JSON.stringify({ username: u, password: p }) }); },
+                devLogin() { return this.request('/dev-login', { method: 'POST' }); },
                 logout() { return this.request('/logout', { method: 'POST' }); },
                 getUser() { return this.request('/user'); },
                 getTopics() { return this.request('/topics'); },
-                fetchRSS(keyword) { return fetch(`/api/rss?keyword=${encodeURIComponent(keyword)}`, { credentials: 'include' }); },
+                fetchRSS() { return fetch(`/api/rss`, { credentials: 'include' }); },
                 summarize(articles, length) {
                     return fetch("/api/summarize", {
                         method: "POST",
@@ -263,7 +264,7 @@
                 loadingSpinner.style.display = 'block';
 
                 try {
-                    const rssRes = await api.fetchRSS(keyword);
+                    const rssRes = await api.fetchRSS();
                     if (!rssRes.ok) {
                         const data = await rssRes.json();
                         if (rssRes.status === 401) showLogin();
@@ -336,7 +337,7 @@
             // --- Initial Load ---
             (async () => {
                 try {
-                    const user = await api.getUser();
+                    const user = await api.devLogin();
                     showApp(user);
                     loadAppData();
                 } catch (err) {

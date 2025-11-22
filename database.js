@@ -5,129 +5,129 @@ const bcrypt = require('bcrypt');
 
 const DBSOURCE = path.join(__dirname, 'db', 'db.sqlite');
 
-
 const dbDir = path.dirname(DBSOURCE);
 if (!fs.existsSync(dbDir)) {
     fs.mkdirSync(dbDir, { recursive: true });
     console.log(`Created database directory: ${dbDir}`);
 }
 
-let db = new sqlite3.Database(DBSOURCE, (err) => {
-    if (err) {
-      
-      console.error(err.message)
-      throw err
-    }else{
-        console.log('Connected to the SQLite database.');
-        db.run('PRAGMA journal_mode = WAL;', (err) => {
+let db;
+
+function init() {
+    return new Promise((resolve, reject) => {
+        db = new sqlite3.Database(DBSOURCE, (err) => {
             if (err) {
-                console.error('Failed to enable WAL mode:', err.message);
+                console.error(err.message);
+                reject(err);
             } else {
-                console.log('WAL mode enabled.');
-            }
-        });
-        db.serialize(() => {
-            
-            db.run(`CREATE TABLE IF NOT EXISTS articles (
-                link TEXT PRIMARY KEY,
-                open_count INTEGER DEFAULT 0
-            )`, (err) => {
-                if (err) {
-                    console.error('Error creating articles table:', err.message);
-                    return;
-                }
-                                console.log('Table "articles" is ready.');
-                
-                                db.run(`CREATE TABLE IF NOT EXISTS users (
-                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                                    username TEXT UNIQUE,
-                                    password TEXT
-                                )`, (err) => {
-                                    if (err) {
-                                        console.error('Error creating users table:', err.message);
-                                        return;
-                                    }
-                                    console.log('Table "users" is ready.');
-
-                                    db.run(`CREATE TABLE IF NOT EXISTS topics (
-                                        user_id INTEGER PRIMARY KEY,
-                                        main_topic TEXT,
-                                        include_keywords TEXT,
-                                        exclude_keywords TEXT,
-                                        FOREIGN KEY (user_id) REFERENCES users (id)
-                                    )`, (err) => {
-                                        if (err) {
-                                            console.error('Error creating topics table:', err.message);
-                                            return;
-                                        }
-                                        console.log('Table "topics" is ready.');
-                                    });
-                                });
-                
-                                const columns = [
-                    { name: 'title', type: 'TEXT' },
-                    { name: 'summary', type: 'TEXT' },
-                    { name: 'date', type: 'TEXT' },
-                    { name: 'cached_at', type: 'DATETIME' }
-                ];
-
-                db.all("PRAGMA table_info(articles)", (err, existingColumns) => {
-                    if (err) {
-                        console.error('Error fetching table info:', err.message);
-                        return;
-                    }
-                    const existingColumnNames = existingColumns.map(c => c.name);
-                    columns.forEach(column => {
-                        if (!existingColumnNames.includes(column.name)) {
-                            db.run(`ALTER TABLE articles ADD COLUMN ${column.name} ${column.type}`, (err) => {
-                                if (err) {
-                                    console.error(`Error adding column ${column.name}:`, err.message);
-                                } else {
-                                    console.log(`Column "${column.name}" added to "articles" table.`);
-                                }
-                            });
+                console.log('Connected to the SQLite database.');
+                db.serialize(() => {
+                    db.run(`CREATE TABLE IF NOT EXISTS articles (
+                        link TEXT PRIMARY KEY,
+                        open_count INTEGER DEFAULT 0,
+                        title TEXT,
+                        summary TEXT,
+                        date TEXT,
+                        cached_at DATETIME
+                    )`, (err) => {
+                        if (err) {
+                            console.error('Error creating articles table:', err.message);
+                            return reject(err);
+                        }
+                        console.log('Table "articles" is ready.');
+                    });
+                    db.run(`CREATE TABLE IF NOT EXISTS users (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        username TEXT UNIQUE,
+                        password TEXT
+                    )`, (err) => {
+                        if (err) {
+                            console.error('Error creating users table:', err.message);
+                            return reject(err);
+                        }
+                        console.log('Table "users" is ready.');
+                    });
+                    db.run(`CREATE TABLE IF NOT EXISTS topics (
+                        user_id INTEGER PRIMARY KEY,
+                        main_topic TEXT,
+                        include_keywords TEXT,
+                        exclude_keywords TEXT,
+                        FOREIGN KEY (user_id) REFERENCES users (id)
+                    )`, (err) => {
+                        if (err) {
+                            console.error('Error creating topics table:', err.message);
+                            return reject(err);
+                        }
+                        console.log('Table "topics" is ready.');
+                    });
+                    db.run(`
+                        CREATE TABLE IF NOT EXISTS jobs (
+                            id TEXT PRIMARY KEY,
+                            user_id INTEGER,
+                            status TEXT DEFAULT 'pending',
+                            progress INTEGER DEFAULT 0,
+                            FOREIGN KEY (user_id) REFERENCES users (id)
+                        )
+                    `, (err) => {
+                        if (err) {
+                            console.error('Error creating jobs table:', err.message);
+                            return reject(err);
+                        }
+                        console.log('Table "jobs" is ready.');
+                    });
+                    db.run(`
+                        CREATE TABLE IF NOT EXISTS job_articles (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            job_id TEXT,
+                            link TEXT,
+                            title TEXT,
+                            content TEXT,
+                            summary TEXT,
+                            reason TEXT,
+                            status TEXT DEFAULT 'pending',
+                            FOREIGN KEY (job_id) REFERENCES jobs (id)
+                        )
+                    `, (err) => {
+                        if (err) {
+                            console.error('Error creating job_articles table:', err.message);
+                            return reject(err);
+                        }
+                        console.log('Table "job_articles" is ready.');
+                    });
+                     // migrations
+                     db.run("ALTER TABLE job_articles ADD COLUMN content TEXT", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding content column to job_articles:', err.message);
+                            }
+                        } else {
+                            console.log('Column "content" added to "job_articles" or already exists.');
                         }
                     });
+                    db.run("ALTER TABLE job_articles ADD COLUMN summary TEXT", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding summary column to job_articles:', err.message);
+                            }
+                        } else {
+                            console.log('Column "summary" added to "job_articles" or already exists.');
+                        }
+                    });
+                    db.run("ALTER TABLE job_articles ADD COLUMN reason TEXT", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding reason column to job_articles:', err.message);
+                            }
+                        } else {
+                            console.log('Column "reason" added to "job_articles" or already exists.');
+                        }
+                        resolve();
+                    });
                 });
-            });
-
-            db.run(`
-                CREATE TABLE IF NOT EXISTS jobs (
-                    id TEXT PRIMARY KEY,
-                    user_id INTEGER,
-                    status TEXT DEFAULT 'pending',
-                    progress INTEGER DEFAULT 0,
-                    FOREIGN KEY (user_id) REFERENCES users (id)
-                )
-            `, (err) => {
-                if (err) {
-                    console.error('Error creating jobs table:', err.message);
-                } else {
-                    console.log('Table "jobs" is ready.');
-                }
-            });
-
-            db.run(`
-                CREATE TABLE IF NOT EXISTS job_articles (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    job_id TEXT,
-                    link TEXT,
-                    title TEXT,
-                    content TEXT,
-                    summary TEXT,
-                    status TEXT DEFAULT 'pending',
-                    FOREIGN KEY (job_id) REFERENCES jobs (id)
-                )
-            `, (err) => {
-                if (err) {
-                    console.error('Error creating job_articles table:', err.message);
-                } else {
-                    console.log('Table "job_articles" is ready.');
-                }
-            });
+            }
         });
-    }
-});
+    });
+}
 
 function createJob(jobId, userId, status = 'pending') {
     return new Promise((resolve, reject) => {
@@ -136,7 +136,7 @@ function createJob(jobId, userId, status = 'pending') {
             if (err) {
                 reject(err);
             } else {
-                resolve({ id: jobId });
+                resolve({ id: this.lastID });
             }
         });
     });
@@ -144,11 +144,11 @@ function createJob(jobId, userId, status = 'pending') {
 
 function addArticlesToJob(jobId, articles) {
     return new Promise((resolve, reject) => {
-        const sql = `INSERT INTO job_articles (job_id, link, title, content) VALUES (?, ?, ?, ?)`;
+        const sql = `INSERT INTO job_articles (job_id, link, title, content, summary, reason) VALUES (?, ?, ?, ?, ?, ?)`;
         db.parallelize(() => {
             const stmt = db.prepare(sql);
             for (const article of articles) {
-                stmt.run(jobId, article.link, article.title, article.content);
+                stmt.run(jobId, article.link, article.title, article.content, article.summary, article.reason);
             }
             stmt.finalize((err) => {
                 if (err) {
@@ -324,4 +324,43 @@ function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords })
     });
 }
 
-module.exports = { db, createUser, getUserByUsername, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, getPendingArticles, getPendingArticlesCountForJob, updateArticle, updateArticleStatus, updateJobStatus };
+function clearDatabase() {
+    return new Promise((resolve, reject) => {
+        db.serialize(() => {
+            db.run('DELETE FROM job_articles', (err) => {
+                if (err) return reject(err);
+            });
+            db.run('DELETE FROM jobs', (err) => {
+                if (err) return reject(err);
+            });
+            db.run('DELETE FROM topics', (err) => {
+                if (err) return reject(err);
+            });
+            db.run('DELETE FROM users', (err) => {
+                if (err) return reject(err);
+            });
+            db.run('DELETE FROM articles', (err) => {
+                if (err) return reject(err);
+                resolve();
+            });
+        });
+    });
+}
+
+module.exports = {
+    init,
+    createJob,
+    addArticlesToJob,
+    getJob,
+    getJobArticles,
+    getPendingArticles,
+    getPendingArticlesCountForJob,
+    updateArticle,
+    updateArticleStatus,
+    updateJobStatus,
+    createUser,
+    getUserByUsername,
+    getTopicByUserId,
+    upsertTopic,
+    clearDatabase,
+};
