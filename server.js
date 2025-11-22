@@ -12,7 +12,7 @@ const fetch = require('node-fetch');
 const { default: axios } = require('axios');
 const cheerio = require('cheerio');
 const { getContentTask } = require('./task.js');
-const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, updateArticleSummary, updateJobStatusAndReason } = require('./database.js');
+const { createUser, getUserByUsername, db, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, updateArticleSummary } = require('./database.js');
 const { retry, callGemini } = require('./utils.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
@@ -32,8 +32,8 @@ async function initializeCluster() {
     try {
         console.log('[Server] Initializing Puppeteer cluster in the background...');
         cluster = await Cluster.launch({
-            concurrency: Cluster.CONCURRENCY_PAGE,
-            maxConcurrency: 4, // Lowered concurrency to reduce resource load during semantic check
+            concurrency: Cluster.CONCURRENCY_CONTEXT,
+            maxConcurrency: 2, // Lowered concurrency to reduce resource load during semantic check
             puppeteer: puppeteer,
             puppeteerOptions: {
                 headless: true,
@@ -197,14 +197,11 @@ async function main() {
             );
             const articlesWithContentResults = await Promise.allSettled(contentPromises);
 
-            // Log failed articles for debugging
-            articlesWithContentResults.forEach(result => {
+            articlesWithContentResults.forEach((result, i) => {
                 if (result.status === 'rejected') {
-                    console.error(`[Content Fetch] Task failed unexpectedly:`, result.reason);
+                    console.log(`[Content Fetch] ❌ Task for article ${articlesWithRealLinks[i].link} rejected:`, result.reason?.message);
                 } else if (result.value.error) {
-                    // Log the first 500 chars of the logs from the task to avoid flooding the console
-                    const logsPreview = result.value.logs ? result.value.logs.join('\n').substring(0, 500) : 'No logs available.';
-                    console.error(`[Content Fetch] Task for ${result.value.link} failed with error: ${result.value.error}\nTask logs:\n${logsPreview}...`);
+                    console.log(`[Content Fetch] ⚠️ Task for article ${articlesWithRealLinks[i].link} failed:`, result.value.error);
                 }
             });
 
@@ -214,22 +211,16 @@ async function main() {
 
             console.log(`[Content Fetch] Successfully got content for ${articlesWithContent.length} articles.`);
 
-            // Create a job regardless of content retrieval success
+            // Step 3: Create a job and store articles
             const jobId = randomUUID();
             await createJob(jobId, req.session.userId);
+            await addArticlesToJob(jobId, articlesWithContent.map(article => ({
+                link: article.link,
+                title: article.title,
+                content: article.articleText
+            })));
 
-            if (articlesWithContent.length === 0) {
-                console.error("[Job] No articles had their content successfully extracted. Marking job as failed.");
-                const reason = "Failed to retrieve content from any article. Please check the search topic or try again later.";
-                await updateJobStatusAndReason(jobId, 'failed', reason);
-            } else {
-                await addArticlesToJob(jobId, articlesWithContent.map(article => ({
-                    link: article.link,
-                    title: article.title,
-                    content: article.articleText
-                })));
-                console.log(`[Job] Created job ${jobId} with ${articlesWithContent.length} articles.`);
-            }
+            console.log(`[Job] Created job ${jobId} with ${articlesWithContent.length} articles.`);
 
             res.status(202).json({ jobId });
 
@@ -251,16 +242,10 @@ async function main() {
                 const articles = await getJobArticles(jobId);
                 const semanticallyMatchedArticles = articles.filter(article => article.summary);
                 semanticallyMatchedArticles.sort((a, b) => new Date(b.isoDate) - new Date(a.isoDate));
-                return res.json({ status: 'completed', articles: semanticallyMatchedArticles });
-            } 
-            
-            if (job.status === 'failed') {
-                return res.json({ status: 'failed', reason: job.reason });
+                res.json({ status: 'completed', articles: semanticallyMatchedArticles });
+            } else {
+                res.json({ status: job.status, progress: job.progress });
             }
-
-            // For 'pending' or other statuses
-            res.json({ status: job.status, progress: job.progress });
-
         } catch (err) {
             console.error(`[Results] Error fetching results for job ${jobId}:`, err);
             res.status(500).json({ error: "Error fetching job results" });
@@ -294,6 +279,7 @@ async function main() {
     });
     
     app.post("/api/summarize", isAuthenticated, async (req, res) => {
+        console.log('[API /summarize] Received request. Session:', req.session, 'Body:', req.body);
         if (!isClusterReady) {
             return res.status(503).json({ error: "The summary service is starting up. Please try again in a moment." });
         }

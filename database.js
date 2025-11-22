@@ -104,23 +104,6 @@ let db = new sqlite3.Database(DBSOURCE, (err) => {
                     console.error('Error creating jobs table:', err.message);
                 } else {
                     console.log('Table "jobs" is ready.');
-                    // Check and add 'reason' column to jobs table
-                    db.all("PRAGMA table_info(jobs)", (err, existingColumns) => {
-                        if (err) {
-                            console.error('Error fetching jobs table info:', err.message);
-                            return;
-                        }
-                        const existingColumnNames = existingColumns.map(c => c.name);
-                        if (!existingColumnNames.includes('reason')) {
-                            db.run(`ALTER TABLE jobs ADD COLUMN reason TEXT`, (err) => {
-                                if (err) {
-                                    console.error(`Error adding column 'reason' to 'jobs':`, err.message);
-                                } else {
-                                    console.log(`Column "reason" added to "jobs" table.`);
-                                }
-                            });
-                        }
-                    });
                 }
             });
 
@@ -161,7 +144,7 @@ function createJob(jobId, userId, status = 'pending') {
 
 function addArticlesToJob(jobId, articles) {
     return new Promise((resolve, reject) => {
-        const sql = `INSERT INTO job_articles (job_id, link, title, content, status) VALUES (?, ?, ?, ?, 'pending')`;
+        const sql = `INSERT INTO job_articles (job_id, link, title, content) VALUES (?, ?, ?, ?)`;
         db.parallelize(() => {
             const stmt = db.prepare(sql);
             for (const article of articles) {
@@ -272,19 +255,6 @@ function updateJobStatus(jobId, status) {
     });
 }
 
-function updateJobStatusAndReason(jobId, status, reason) {
-    return new Promise((resolve, reject) => {
-        const sql = `UPDATE jobs SET status = ?, reason = ? WHERE id = ?`;
-        db.run(sql, [status, reason, jobId], function(err) {
-            if (err) {
-                reject(err);
-            } else {
-                resolve({ changes: this.changes });
-            }
-        });
-    });
-}
-
 
 function createUser(username, password) {
     return new Promise(async (resolve, reject) => {
@@ -354,4 +324,4 @@ function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords })
     });
 }
 
-module.exports = { db, createUser, getUserByUsername, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, getPendingArticles, getPendingArticlesCountForJob, updateArticle, updateArticleStatus, updateJobStatus, updateJobStatusAndReason };
+module.exports = { db, createUser, getUserByUsername, getTopicByUserId, upsertTopic, createJob, addArticlesToJob, getJob, getJobArticles, getPendingArticles, getPendingArticlesCountForJob, updateArticle, updateArticleStatus, updateJobStatus };

@@ -69,7 +69,7 @@
             <form id="searchForm">
                 <i class="bi bi-search" style="color: var(--text-secondary-color);"></i>
                 <input id="keyword" class="form-control" type="search" placeholder="Set a topic in Personalize to get started...">
-                <select id="summaryLength" class="form-select">
+                <select id="summaryLength" class="form-select" style="display: none;">
                     <option value="short">Short</option>
                     <option value="medium" selected>Medium</option>
                     <option value="long">Long</option>
@@ -179,31 +179,24 @@
                 }
             };
             
-            const renderDashboard = (summaries, metaSummary) => {
+            const renderDashboard = (articles) => {
                 dashboardDiv.innerHTML = "";
 
-                if (!metaSummary && summaries.length === 0) {
-                    dashboardDiv.innerHTML = `<div class="text-center"><p style="color: var(--text-secondary-color);">No summaries could be generated. Please try a different search term or adjust your personalization settings.</p></div>`;
+                if (!articles || articles.length === 0) {
+                    dashboardDiv.innerHTML = `<div class="text-center"><p style="color: var(--text-secondary-color);">No relevant articles found. Please try a different search term or adjust your personalization settings.</p></div>`;
                     return;
                 }
 
-                if (metaSummary) {
-                    const metaCard = document.createElement("div");
-                    metaCard.className = "card-ui meta-summary";
-                    metaCard.innerHTML = `
-                        <h5 class="card-title">Meta Summary</h5>
-                        <p class="card-text">${metaSummary.replace(/\*/g, '')}</p>
-                    `;
-                    dashboardDiv.appendChild(metaCard);
-                }
-
-                summaries.forEach(a => {
+                articles.forEach(a => {
                     const card = document.createElement("div");
                     card.className = "card-ui";
+                    // The 'summary' is now the reason from the AI worker
+                    const summaryText = a.summary || 'No summary provided.'; 
+                    const isoDate = a.isoDate || new Date().toISOString();
                     card.innerHTML = `
                         <h5 class="card-title"><a href="${a.link}" target="_blank">${a.title}</a></h5>
-                        <h6 class="card-subtitle mb-3">${new Date(a.date).toLocaleDateString()}</h6>
-                        <p class="card-text small">${a.summary.replace(/\*/g, '')}</p>
+                        <h6 class="card-subtitle mb-3">${new Date(isoDate).toLocaleDateString()}</h6>
+                        <p class="card-text small"><em>AI's reasoning: ${summaryText.replace(/\*/g, '')}</em></p>
                         <a href="${a.link}" target="_blank" class="btn-ghost mt-3 d-inline-block">Read Full Article →</a>
                     `;
                     dashboardDiv.appendChild(card);
@@ -259,12 +252,9 @@
                 e.preventDefault();
                 const keyword = keywordInput.value.trim();
                 
-                // If the input is disabled, it means we are using the personalized topic.
-                // The backend handles the case where the keyword is empty and a topic is set.
                 if (keywordInput.disabled && !keyword) {
                     // Let it proceed with empty keyword
                 } else if (!keyword) {
-                     // If input is enabled and empty, do nothing.
                     return;
                 }
 
@@ -273,26 +263,18 @@
                 loadingSpinner.style.display = 'block';
 
                 try {
-                    // The backend now intelligently decides whether to use the keyword 
-                    // or the user's saved topic based on this single endpoint.
                     const rssRes = await api.fetchRSS(keyword);
-
                     if (!rssRes.ok) {
                         const data = await rssRes.json();
                         if (rssRes.status === 401) showLogin();
                         throw new Error(data.error || "RSS Feed Error");
                     }
-                    const articles = await rssRes.json();
+                    const { jobId } = await rssRes.json();
 
-                    const summaryRes = await api.summarize(articles, summaryLength.value);
-                    if (!summaryRes.ok) {
-                        const data = await summaryRes.json();
-                        if (summaryRes.status === 401) showLogin();
-                        throw data;
-                    }
-                    const data = await summaryRes.json();
+                    // Start polling for results
+                    const articles = await pollForResult(jobId);
                     
-                    renderDashboard(data.summaries, data.metaSummary);
+                    renderDashboard(articles, null); // The results are already filtered, no meta-summary yet
 
                 } catch (err) {
                     renderError(errorContainer, err);
@@ -300,6 +282,39 @@
                     loadingSpinner.style.display = 'none';
                 }
             });
+
+            async function pollForResult(jobId) {
+                const pollInterval = 3000; // 3 seconds
+                const maxDuration = 120000; // 2 minutes
+                const startTime = Date.now();
+
+                while (Date.now() - startTime < maxDuration) {
+                    try {
+                        const res = await fetch(`/api/results/${jobId}`, { credentials: 'include' });
+                        if (!res.ok) {
+                            if (res.status === 401) showLogin();
+                            throw new Error("Could not fetch job results.");
+                        }
+                        
+                        const result = await res.json();
+
+                        if (result.status === 'completed') {
+                            return result.articles;
+                        } else if (result.status === 'failed') {
+                            throw new Error("The article processing job failed.");
+                        }
+                        // If 'pending' or 'in_progress', just wait and poll again.
+                        
+                    } catch (error) {
+                        // Re-throw to be caught by the main try-catch block
+                        throw error;
+                    }
+                    
+                    await new Promise(resolve => setTimeout(resolve, pollInterval));
+                }
+
+                throw new Error("Request timed out. The server is taking too long to respond.");
+            }
             
             async function loadAppData() {
                 try {
