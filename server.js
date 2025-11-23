@@ -19,9 +19,7 @@ const IN_PROD = process.env.NODE_ENV === 'production';
 async function main() {
     await db.init();
 
-    const queuesModule = await import('./queues.mjs');
-    const fetchQueue = queuesModule.default?.fetchQueue;
-    const semanticSummaryQueue = queuesModule.default?.semanticSummaryQueue;
+    const { fetchQueue, semanticSummaryQueue } = await import('./queues.mjs');
 
     if (!fetchQueue) throw new Error('fetchQueue is undefined!');
     if (!semanticSummaryQueue) throw new Error('semanticSummaryQueue is undefined!');
