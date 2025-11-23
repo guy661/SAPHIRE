@@ -29,7 +29,7 @@ async function extractArticleContent(url) {
                 throw new Error(`Google News redirect fetch HTTP error! status: ${response.status}`);
             }
             targetUrl = response.url;
-            console.log(`[Fetch Worker] Extracted real URL: ${targetUrl}`);
+            console.log(`[Fetch Worker] ### LOG: Extracted real URL (targetUrl): ${targetUrl}`);
         } catch (error) {
             console.error('[Fetch Worker] Error getting real URL from Google News:', error);
             throw new Error('Could not extract real URL from Google News page.');
@@ -51,16 +51,19 @@ async function extractArticleContent(url) {
     
     const html = await response.text();
     const finalUrl = response.url;
+    console.log(`[Fetch Worker] ### LOG: Final URL from second fetch (finalUrl): ${finalUrl}`);
     const doc = new JSDOM(html, { url: finalUrl });
     const reader = new Readability(doc.window.document);
     const readableArticle = reader.parse();
 
     if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
-        return {
+        const articleData = {
             articleText: readableArticle.textContent,
             title: readableArticle.title,
             url: finalUrl
         };
+        console.log(`[Fetch Worker] ### LOG: Article data being returned from extractArticleContent:`, articleData);
+        return articleData;
     } else {
         throw new Error('Readability parsing failed or content too short.');
     }
@@ -74,6 +77,7 @@ new Worker(
     try {
       const article = await extractArticleContent(url);
       
+      console.log(`[Fetch Worker] ### LOG: Calling updateArticleContent with: articleId=${articleId}, title=${article.title}, url=${article.url}`);
       await updateArticleContent(articleId, article.title, article.articleText, article.url);
       
       await semanticSummaryQueue.add("semantic-summary", {
