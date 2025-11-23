@@ -2,46 +2,43 @@ import { Worker } from "bullmq";
 import { connection } from "../redis.mjs";
 import { semanticSummaryQueue } from "../queues.mjs";
 import { updateArticleContent } from "../database.js";
-import { JSDOM } from 'jsdom';
 import { Readability } from '@mozilla/readability';
-import fetch from 'node-fetch';
 import { retry } from "../utils.js";
 import { URL } from 'url';
+import axios from 'axios';
+import cheerio from 'cheerio';
+import { JSDOM } from 'jsdom';
 
-// This is a simplified version of the fast path from _getArticleContent
+
+async function getArticleUrl(googleRssUrl) {
+    const response = await axios.get(googleRssUrl);
+    const $ = cheerio.load(response.data);
+    const data = $('c-wiz[data-p]').attr('data-p');
+    const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
+
+    const payload = {
+      'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
+    };
+
+    const headers = {
+      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+    };
+
+    
+    const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers });
+    const arrayString = JSON.parse(postResponse.data.replace(")]}'", ""))[0][2];
+    const articleUrl = JSON.parse(arrayString)[1];
+
+    return articleUrl;
+}
+
 async function extractArticleContent(url) {
     let targetUrl = url;
 
-    async function extractGoogleNewsUrl(feedUrl) {
-      const controller = new AbortController();
-      const id = setTimeout(() => controller.abort(), 15000);
-      const response = await fetch(feedUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        signal: controller.signal
-      }).finally(() => clearTimeout(id));
-
-      if (!response.ok) throw new Error(`Google News fetch failed: ${response.status}`);
-
-      const html = await response.text();
-      const dom = new JSDOM(html);
-      const doc = dom.window.document;
-
-      // Google News cards contain <a href="https://actualarticle.com/...">
-      const articleLink = doc.querySelector('a[href*="http"]')?.href;
-      if (!articleLink) throw new Error('Could not find real article URL in Google News');
-
-      // Google sometimes redirects via /url?q=REAL_URL
-      const urlObj = new URL(articleLink, feedUrl);
-      if (urlObj.pathname === '/url' && urlObj.searchParams.has('q')) {
-        return urlObj.searchParams.get('q');
-      }
-
-      return articleLink;
-    }
-
     if (url.includes('news.google.com')) {
       console.log(`[Fetch Worker] Google News URL detected. Extracting real URL...`);
-      targetUrl = await extractGoogleNewsUrl(url);
+      targetUrl = await getArticleUrl(url);
       console.log(`[Fetch Worker] Real article URL: ${targetUrl}`);
     }
 
@@ -49,16 +46,16 @@ async function extractArticleContent(url) {
     const finalController = new AbortController();
     const finalId = setTimeout(() => finalController.abort(), 15000);
     
-    const response = await retry(() => fetch(targetUrl, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
-        signal: finalController.signal
-    }).finally(() => clearTimeout(finalId)));
+    const response = await retry(async () => {
+        const res = await axios.get(targetUrl, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
+            signal: finalController.signal,
+        });
+        // Axios response URL is on the request object after redirects
+        return { data: res.data, url: res.request.res.responseUrl || targetUrl };
+    });
 
-    if (!response.ok) {
-        throw new Error(`Fast Path HTTP error! status: ${response.status}`);
-    }
-    
-    const html = await response.text();
+    const html = response.data;
     const finalUrl = response.url;
     const doc = new JSDOM(html, { url: finalUrl });
     const reader = new Readability(doc.window.document);
