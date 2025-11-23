@@ -6,7 +6,7 @@ import { Readability } from '@mozilla/readability';
 import { retry } from "../utils.js";
 import { URL } from 'url';
 import axios from 'axios';
-import cheerio from 'cheerio';
+import * as cheerio from 'cheerio';
 import { JSDOM } from 'jsdom';
 
 
