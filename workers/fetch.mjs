@@ -132,6 +132,7 @@ new Worker(
       
       await updateArticleContent(articleId, article.title, article.articleText, article.url);
       
+      if (!semanticSummaryQueue) throw new Error('semanticSummaryQueue is undefined');
       await semanticSummaryQueue.add("semantic-summary", {
         articleId,
         userId,

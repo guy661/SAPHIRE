@@ -19,8 +19,12 @@ const IN_PROD = process.env.NODE_ENV === 'production';
 async function main() {
     await db.init();
 
-    const { fetchQueue } = await import('./queues.mjs');
-    console.log('fetchQueue:', fetchQueue); // darf nicht undefined sein
+    const queuesModule = await import('./queues.mjs');
+    const fetchQueue = queuesModule.fetchQueue;
+    const semanticSummaryQueue = queuesModule.semanticSummaryQueue;
+
+    console.log('fetchQueue:', fetchQueue);
+    console.log('semanticSummaryQueue:', semanticSummaryQueue);
 
     if (!process.env.GEMINI_API_KEY || !process.env.SESS_SECRET) {
         console.error("Error: Missing GEMINI_API_KEY or SESS_SECRET in the .env file.");
