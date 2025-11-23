@@ -74,7 +74,7 @@
                     <option value="medium" selected>Medium</option>
                     <option value="long">Long</option>
                 </select>
-                <button id="loadBtn" class="btn btn-primary" type="submit">Get News</button>
+                <button id="loadBtn" class="btn btn-primary" type="button">Get News</button>
             </form>
 
             <div id="resultsArea">
@@ -105,9 +105,8 @@
             let isLogin = true;
 
             // --- App Elements ---
-            const searchForm = document.getElementById("searchForm");
+            const loadBtn = document.getElementById("loadBtn");
             const keywordInput = document.getElementById("keyword");
-            const summaryLength = document.getElementById("summaryLength");
             const dashboardDiv = document.getElementById("dashboard");
             const errorContainer = document.getElementById("error-container");
             const loadingSpinner = document.getElementById("loading-spinner");
@@ -249,8 +248,7 @@
                 }
             });
 
-            searchForm.addEventListener("submit", async (e) => {
-                e.preventDefault();
+            loadBtn.addEventListener("click", async () => {
                 const keyword = keywordInput.value.trim();
                 
                 if (keywordInput.disabled && !keyword) {

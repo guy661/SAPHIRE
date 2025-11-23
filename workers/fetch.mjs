@@ -74,7 +74,7 @@ new Worker(
     try {
       const article = await extractArticleContent(url);
       
-      await updateArticleContent(articleId, article.title, article.articleText);
+      await updateArticleContent(articleId, article.title, article.articleText, article.url);
       
       await semanticSummaryQueue.add("semantic-summary", {
         articleId,
