@@ -2,12 +2,10 @@ import { Worker } from "bullmq";
 import { connection } from "../redis.mjs";
 import { semanticSummaryQueue } from "../queues.mjs";
 import { updateArticleContent } from "../database.js";
-import { Readability } from '@mozilla/readability';
 import { retry } from "../utils.js";
 import { URL } from 'url';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import { JSDOM } from 'jsdom';
 
 
 async function getArticleUrl(googleRssUrl) {
@@ -25,8 +23,6 @@ async function getArticleUrl(googleRssUrl) {
         
         const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
 
-        // The user mentioned a 'run' field, but the example code doesn't use it.
-        // The core logic seems to be slicing the obj. We will make this safer.
         if (!Array.isArray(obj) || obj.length < 8) {
             console.warn(`[Fetch Worker] Unexpected obj structure for ${googleRssUrl}. Obj:`, obj);
             throw new Error('Unexpected data structure in data-p');
@@ -59,9 +55,32 @@ async function getArticleUrl(googleRssUrl) {
 
     } catch (error) {
         console.error(`[Fetch Worker] Failed to extract real URL for ${googleRssUrl}:`, error.message);
-        // Re-throw the error to be caught by the job's catch block
         throw error;
     }
+}
+
+function extractArticleWithCheerio(html, url) {
+    const $ = cheerio.load(html);
+    const title = $('title').text();
+    let text;
+
+    // Domain-specific selectors
+    if (url.includes('tagesschau.de')) {
+        text = $('main article p').map((i, el) => $(el).text()).get().join('\n');
+    } else if (url.includes('spiegel.de')) {
+        text = $('article section p').map((i, el) => $(el).text()).get().join('\n');
+    } else if (url.includes('derstandard.de')) {
+        text = $('article div.article-body p').map((i, el) => $(el).text()).get().join('\n');
+    } else if (url.includes('heise.de')) {
+        text = $('div.article-content p').map((i, el) => $(el).text()).get().join('\n');
+    } else if (url.includes('taz.de')) {
+        text = $('main p').map((i, el) => $(el).text()).get().join('\n');
+    } else {
+        // Fallback: all <p> tags
+        text = $('p').map((i, el) => $(el).text()).get().join('\n');
+    }
+
+    return { text, title };
 }
 
 async function extractArticleContent(url) {
@@ -73,10 +92,8 @@ async function extractArticleContent(url) {
       console.log(`[Fetch Worker] Real article URL: ${targetUrl}`);
     }
 
-    // Fallback for YouTube videos
     if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
         console.log(`[Fetch Worker] YouTube URL detected. Skipping content fetch for ${targetUrl}`);
-        // Can't get title without another fetch, so we'll have to settle for a placeholder
         return {
             articleText: 'This is a video article and cannot be summarized.',
             title: 'Video Article',
@@ -84,7 +101,6 @@ async function extractArticleContent(url) {
         };
     }
 
-    // Fetch the final target URL (either original or the one extracted from Google News)
     const finalController = new AbortController();
     const finalId = setTimeout(() => finalController.abort(), 15000);
     
@@ -93,28 +109,25 @@ async function extractArticleContent(url) {
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
             signal: finalController.signal,
         });
-        // Axios response URL is on the request object after redirects
         return { data: res.data, url: res.request.res.responseUrl || targetUrl };
     });
 
     const html = response.data;
     const finalUrl = response.url;
-    const doc = new JSDOM(html, { url: finalUrl });
-    const reader = new Readability(doc.window.document);
-    const readableArticle = reader.parse();
+    
+    const { text: articleText, title } = extractArticleWithCheerio(html, finalUrl);
 
-    if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
+    if (articleText && articleText.length > 250) {
         return {
-            articleText: readableArticle.textContent,
-            title: readableArticle.title || 'Title not found',
+            articleText,
+            title: title || 'Title not found',
             url: finalUrl
         };
     } else {
-        // If readability fails, return a graceful fallback
-        console.warn(`[Fetch Worker] Readability parsing failed for ${finalUrl}. Returning fallback.`);
+        console.warn(`[Fetch Worker] Cheerio parsing failed or content too short for ${finalUrl}.`);
         return {
-            articleText: `Could not parse article content. The content might be too short, dynamic, or in an unsupported format.`,
-            title: 'Content not available',
+            articleText: `Could not parse article content. The content might be too short or in an unsupported format.`,
+            title: title || 'Content not available',
             url: finalUrl
         };
     }
@@ -139,8 +152,6 @@ new Worker(
 
     } catch (error) {
       console.error(`[Fetch Worker] FAILED for articleId: ${articleId}, url: ${url}`, error.message);
-      // Optionally, update article status to 'fetch_failed'
-      // await updateArticleStatus(articleId, 'fetch_failed');
     }
   },
   { connection, concurrency: 2 }
