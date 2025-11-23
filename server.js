@@ -20,8 +20,11 @@ async function main() {
     await db.init();
 
     const queuesModule = await import('./queues.mjs');
-    const fetchQueue = queuesModule.fetchQueue;
-    const semanticSummaryQueue = queuesModule.semanticSummaryQueue;
+    const fetchQueue = queuesModule.default?.fetchQueue;
+    const semanticSummaryQueue = queuesModule.default?.semanticSummaryQueue;
+
+    if (!fetchQueue) throw new Error('fetchQueue is undefined!');
+    if (!semanticSummaryQueue) throw new Error('semanticSummaryQueue is undefined!');
 
     console.log('fetchQueue:', fetchQueue);
     console.log('semanticSummaryQueue:', semanticSummaryQueue);
