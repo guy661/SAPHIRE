@@ -12,28 +12,37 @@ import { URL } from 'url';
 async function extractArticleContent(url) {
     let targetUrl = url;
 
-    // If it's a Google News URL, get the content and find the real URL inside
-    if (url.includes('news.google.com')) {
-        console.log(`[Fetch Worker] Google News URL detected. Attempting to get real URL: ${url}`);
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), 15000);
-        
-        try {
-            const response = await retry(() => fetch(url, {
-                redirect: 'follow',
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
-                signal: controller.signal
-            }).finally(() => clearTimeout(id)));
+    async function extractGoogleNewsUrl(feedUrl) {
+      const controller = new AbortController();
+      const id = setTimeout(() => controller.abort(), 15000);
+      const response = await fetch(feedUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: controller.signal
+      }).finally(() => clearTimeout(id));
 
-            if (!response.ok) {
-                throw new Error(`Google News redirect fetch HTTP error! status: ${response.status}`);
-            }
-            targetUrl = response.url;
-            console.log(`[Fetch Worker] ### LOG: Extracted real URL (targetUrl): ${targetUrl}`);
-        } catch (error) {
-            console.error('[Fetch Worker] Error getting real URL from Google News:', error);
-            throw new Error('Could not extract real URL from Google News page.');
-        }
+      if (!response.ok) throw new Error(`Google News fetch failed: ${response.status}`);
+
+      const html = await response.text();
+      const dom = new JSDOM(html);
+      const doc = dom.window.document;
+
+      // Google News cards contain <a href="https://actualarticle.com/...">
+      const articleLink = doc.querySelector('a[href*="http"]')?.href;
+      if (!articleLink) throw new Error('Could not find real article URL in Google News');
+
+      // Google sometimes redirects via /url?q=REAL_URL
+      const urlObj = new URL(articleLink, feedUrl);
+      if (urlObj.pathname === '/url' && urlObj.searchParams.has('q')) {
+        return urlObj.searchParams.get('q');
+      }
+
+      return articleLink;
+    }
+
+    if (url.includes('news.google.com')) {
+      console.log(`[Fetch Worker] Google News URL detected. Extracting real URL...`);
+      targetUrl = await extractGoogleNewsUrl(url);
+      console.log(`[Fetch Worker] Real article URL: ${targetUrl}`);
     }
 
     // Fetch the final target URL (either original or the one extracted from Google News)
@@ -51,19 +60,16 @@ async function extractArticleContent(url) {
     
     const html = await response.text();
     const finalUrl = response.url;
-    console.log(`[Fetch Worker] ### LOG: Final URL from second fetch (finalUrl): ${finalUrl}`);
     const doc = new JSDOM(html, { url: finalUrl });
     const reader = new Readability(doc.window.document);
     const readableArticle = reader.parse();
 
     if (readableArticle && readableArticle.textContent && readableArticle.textContent.length > 250) {
-        const articleData = {
+        return {
             articleText: readableArticle.textContent,
             title: readableArticle.title,
             url: finalUrl
         };
-        console.log(`[Fetch Worker] ### LOG: Article data being returned from extractArticleContent:`, articleData);
-        return articleData;
     } else {
         throw new Error('Readability parsing failed or content too short.');
     }
@@ -77,7 +83,6 @@ new Worker(
     try {
       const article = await extractArticleContent(url);
       
-      console.log(`[Fetch Worker] ### LOG: Calling updateArticleContent with: articleId=${articleId}, title=${article.title}, url=${article.url}`);
       await updateArticleContent(articleId, article.title, article.articleText, article.url);
       
       await semanticSummaryQueue.add("semantic-summary", {
