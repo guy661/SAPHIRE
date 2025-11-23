@@ -18,6 +18,14 @@ async function getArticleUrl(googleRssUrl) {
             throw new Error('Missing data-p attribute');
         }
         const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
+        
+        // Safely access nested property as hinted by the user to prevent crash
+        const run = obj?.[0]?.[2]?.[0];
+        if (!run) {
+            console.warn(`[Fetch Worker] Unexpected obj structure: nested property missing for ${googleRssUrl}.`);
+            throw new Error('Unexpected data structure in data-p, nested property missing.');
+        }
+
         if (!Array.isArray(obj) || obj.length < 8) {
             console.warn(`[Fetch Worker] Unexpected obj structure for ${googleRssUrl}.`);
             throw new Error('Unexpected data structure in data-p');
