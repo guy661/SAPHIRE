@@ -235,10 +235,10 @@ function getPendingArticlesCountForJob(jobId) {
     });
 }
 
-function updateArticle(articleId, summary, status) {
+function updateArticle(articleId, summary, status, reason = '') {
     return new Promise((resolve, reject) => {
-        const sql = `UPDATE job_articles SET summary = ?, status = ? WHERE id = ?`;
-        db.run(sql, [summary, status, articleId], function(err) {
+        const sql = `UPDATE job_articles SET summary = ?, status = ?, reason = ? WHERE id = ?`;
+        db.run(sql, [summary, status, reason, articleId], function(err) {
             if (err) {
                 reject(err);
             } else {
@@ -368,6 +368,44 @@ function clearDatabase() {
     });
 }
 
+function createJobArticle(jobId, article) {
+    return new Promise((resolve, reject) => {
+        const sql = `INSERT INTO job_articles (job_id, link, status) VALUES (?, ?, 'pending')`;
+        db.run(sql, [jobId, article.link], function(err) {
+            if (err) {
+                reject(err);
+            } else {
+                resolve({ id: this.lastID, link: article.link, job_id: jobId, status: 'pending' });
+            }
+        });
+    });
+}
+
+function getJobArticle(articleId) {
+    return new Promise((resolve, reject) => {
+        db.get('SELECT * FROM job_articles WHERE id = ?', [articleId], (err, row) => {
+            if (err) {
+                reject(err);
+            } else {
+                resolve(row);
+            }
+        });
+    });
+}
+
+function updateArticleContent(articleId, title, content, url) {
+    return new Promise((resolve, reject) => {
+        const sql = `UPDATE job_articles SET title = ?, content = ?, link = ?, status = 'fetched' WHERE id = ?`;
+        db.run(sql, [title, content, url, articleId], function(err) {
+            if (err) {
+                reject(err);
+            } else {
+                resolve({ changes: this.changes });
+            }
+        });
+    });
+}
+
 module.exports = {
     init,
     createJob,
@@ -384,4 +422,7 @@ module.exports = {
     getTopicByUserId,
     upsertTopic,
     clearDatabase,
+    createJobArticle,
+    getJobArticle,
+    updateArticleContent,
 };
