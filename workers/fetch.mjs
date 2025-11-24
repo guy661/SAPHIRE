@@ -1,148 +1,97 @@
-import { Worker } from "bullmq";
-import { connection } from "../redis.mjs";
-import { semanticSummaryQueue } from "../queues.mjs";
-import { updateArticleContent } from "../database.js";
-import { retry } from "../utils.js";
-import { URL } from 'url';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
+import { Worker } from 'bullmq';
+import redisConnection from '../redis.mjs';
+import queues from '../queues.mjs';
+import * as db from '../database-postgres.js';
+import { getArticleUrl, extractArticleText, PaywallError } from '../article-parser.js'; // PaywallError re-added to import
+import { Logger, EMOJIS } from '../utils.js';
 
-async function getArticleUrl(googleRssUrl) {
-    // This function remains as implemented before, to get the real URL from a Google News RSS link.
+const logger = new Logger('Fetch Worker', 'blue', EMOJIS.fetch);
+const bullLogger = new Logger('BullMQ', 'red', EMOJIS.bull);
+
+const { semanticSummaryQueue } = queues;
+
+const worker = new Worker('fetch', async (job) => {
+    const { articleId, url: googleUrl, userId } = job.data; // Changed url to googleUrl for clarity
+    logger.info(`Job ${job.id}: Processing articleId ${articleId}, url: ${googleUrl}`);
+
+    let realUrl = googleUrl; // Initialize
+
     try {
-        const response = await axios.get(googleRssUrl);
-        const $ = cheerio.load(response.data);
-        const data = $('c-wiz[data-p]').attr('data-p');
-        if (!data) {
-            console.warn(`[Fetch Worker] Could not find data-p attribute for ${googleRssUrl}`);
-            throw new Error('Missing data-p attribute');
-        }
-        const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
+        await db.updateArticleStatus(articleId, 'processing');
+
+        // 1. Get the real article URL from the Google News redirect URL (re-added)
+        logger.info(`Job ${job.id}: Google News URL detected. Extracting real URL...`);
+        realUrl = await getArticleUrl(googleUrl); // Use the separate getArticleUrl
+        logger.info(`Job ${job.id}: Real article URL: ${realUrl}`);
         
-        // Safely access nested property as hinted by the user to prevent crash
-        const run = obj?.[0]?.[2]?.[0];
-        if (!run) {
-            console.warn(`[Fetch Worker] Unexpected obj structure: nested property missing for ${googleRssUrl}.`);
-            throw new Error('Unexpected data structure in data-p, nested property missing.');
-        }
+        // Update the article with the real URL right away for better tracking
+        // (content and title will be empty for now, updated after extraction)
+        await db.updateArticleContent(articleId, '', '', realUrl);
 
-        if (!Array.isArray(obj) || obj.length < 8) {
-            console.warn(`[Fetch Worker] Unexpected obj structure for ${googleRssUrl}.`);
-            throw new Error('Unexpected data structure in data-p');
-        }
-        const payload = { 'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]]) };
-        const headers = {
-          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-        };
-        const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers });
-        const responseBody = postResponse.data.replace(")]}'", "");
-        const responseArray = JSON.parse(responseBody);
-        const arrayString = responseArray?.[0]?.[2];
-        if (!arrayString) {
-            console.warn(`[Fetch Worker] Could not find arrayString in batchexecute response for ${googleRssUrl}.`);
-            throw new Error('Unexpected batchexecute response structure');
-        }
-        const articleUrl = JSON.parse(arrayString)[1];
-        return articleUrl;
-    } catch (error) {
-        console.error(`[Fetch Worker] Failed to extract real URL for ${googleRssUrl}:`, error.message);
-        throw error;
-    }
-}
 
-async function extractArticleDetailsWithCheerio(url) {
-    try {
-        const { data, request } = await axios.get(url, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36',
-            }
+        // 2. Extract the article text and title (reverted to single call returning object)
+        logger.info(`Job ${job.id}: Parsing content from real URL...`);
+        const { title, content, finalUrl } = await extractArticleText(realUrl); // Call extractArticleText
+        
+        // No explicit content length check here, as extractArticleText now throws PaywallError for too short content
+        
+        logger.info(`Job ${job.id}: Content extracted. Length: ${content.length}`);
+        
+        // 3. Update the database with the content, title, and final URL
+        await db.updateArticleContent(articleId, content, title, finalUrl);
+
+
+        // 4. Get user's language preference and topic for the next stage
+        const user = await db.getUserById(userId);
+        if (!user) throw new Error(`Could not find user with userId ${userId}.`);
+        
+        const userTopic = await db.getTopicByUserId(user.id);
+        if (!userTopic) throw new Error(`Could not find topic for userId ${userId}.`);
+
+        // 5. Queue the article for the semantic summary stage
+        await semanticSummaryQueue.add('semantic-summary', {
+            articleId,
+            userTopic,
+            language: user?.language || 'de'
         });
-        const $ = cheerio.load(data);
-        const title = $('title').text() || 'Title not found';
-        const finalUrl = request.res.responseUrl || url;
-        let text;
 
-        // Domain-specific selectors
-        if (finalUrl.includes('tagesschau.de')) {
-            text = $('main article p').map((i, el) => $(el).text()).get().join('\n');
-        } else if (finalUrl.includes('spiegel.de')) {
-            text = $('article section p').map((i, el) => $(el).text()).get().join('\n');
-        } else if (finalUrl.includes('derstandard.de')) {
-            text = $('article div.article-body p').map((i, el) => $(el).text()).get().join('\n');
-        } else if (finalUrl.includes('heise.de')) {
-            text = $('div.article-content p').map((i, el) => $(el).text()).get().join('\n');
-        } else if (finalUrl.includes('taz.de')) {
-            text = $('main p').map((i, el) => $(el).text()).get().join('\n');
+        logger.info(`Job ${job.id}: Successfully processed and queued for semantic summary: ${articleId}`);
+        return { success: true, finalUrl: realUrl }; // Use realUrl as finalUrl
+
+    } catch (err) {
+        // PaywallError specific handling re-added
+        if (err instanceof PaywallError) {
+            logger.warn(`Job ${job.id}: Paywall detected for article ${articleId}. Marking as failed.`);
+            await db.updateArticleStatus(articleId, 'failed', `Paywall detected: ${err.message}`);
         } else {
-            // Fallback: all <p> tags
-            text = $('p').map((i, el) => $(el).text()).get().join('\n');
+            logger.error(`Job ${job.id}: FAILED to process article ${articleId}.`, err);
+            await db.updateArticleStatus(articleId, 'failed', err.message);
         }
-
-        return { text, title, finalUrl };
-    } catch (error) {
-        console.error(`[Fetch Worker] Cheerio extraction failed for ${url}:`, error.message);
-        throw error;
-    }
-}
-
-async function extractArticleContent(url) {
-    let targetUrl = url;
-
-    if (url.includes('news.google.com')) {
-      console.log(`[Fetch Worker] Google News URL detected. Extracting real URL...`);
-      targetUrl = await getArticleUrl(url);
-      console.log(`[Fetch Worker] Real article URL: ${targetUrl}`);
+        throw err;
     }
 
-    if (targetUrl.includes('youtube.com') || targetUrl.includes('youtu.be')) {
-        console.log(`[Fetch Worker] YouTube URL detected. Skipping content fetch for ${targetUrl}`);
-        return {
-            articleText: 'This is a video article and cannot be summarized.',
-            title: 'Video Article',
-            url: targetUrl
-        };
-    }
-    
-    const { text: articleText, title, finalUrl } = await extractArticleDetailsWithCheerio(targetUrl);
+}, {
+    connection: redisConnection,
+    // Concurrency reverted to 10
+    concurrency: 10
+});
 
-    if (articleText && articleText.length > 250) {
-        return {
-            articleText,
-            title,
-            url: finalUrl
-        };
-    } else {
-        console.warn(`[Fetch Worker] Cheerio parsing failed or content too short for ${finalUrl}.`);
-        return {
-            articleText: `Could not parse article content. The content might be too short or in an unsupported format.`,
-            title: title || 'Content not available',
-            url: finalUrl
-        };
-    }
-}
+worker.on('completed', (job, result) => {
+    bullLogger.info(`Job ${job.id} in 'fetch' has completed. Final URL: ${result.finalUrl}`);
+});
 
-new Worker(
-  "fetch",
-  async job => {
-    const { articleId, url, userId } = job.data;
-    console.log(`[Fetch Worker] Processing articleId: ${articleId}, url: ${url}`);
-    try {
-      const article = await extractArticleContent(url);
-      
-      await updateArticleContent(articleId, article.title, article.articleText, article.url);
-      
-      if (!semanticSummaryQueue) throw new Error('semanticSummaryQueue is undefined');
-      await semanticSummaryQueue.add("semantic-summary", {
-        articleId,
-        userId,
-      });
+worker.on('failed', (job, err) => {
+    bullLogger.error(`Job ${job.id} in 'fetch' has failed. Reason: ${err.message}`);
+});
 
-      console.log(`[Fetch Worker] Successfully processed and queued for semantic summary: ${articleId}`);
+logger.info('Worker started and listening for jobs.');
 
-    } catch (error) {
-      console.error(`[Fetch Worker] FAILED for articleId: ${articleId}, url: ${url}`, error.message);
-    }
-  },
-  { connection, concurrency: 2 }
-);
+// Graceful shutdown
+const gracefulShutdown = async () => {
+    logger.warn('Shutting down gracefully...');
+    await worker.close();
+    process.exit(0);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);

@@ -1,67 +1,93 @@
-import { Worker } from "bullmq";
-import { connection } from "../redis.mjs";
-import db from '../database-postgres.js';
-const { getJobArticle, getTopicByUserId, updateArticle, getPendingArticlesCountForJob, updateJobStatus, getUserById } = db;
-import { semanticCheckTask, summarizeArticleTask } from "../task.js";
-import pkg from '../utils.js';
-const { getApiKeyCount } = pkg;
 
-const apiKeyCount = getApiKeyCount();
-const concurrency = apiKeyCount > 0 ? apiKeyCount : 1;
-console.log(`[Semantic Worker] Setting concurrency to ${concurrency} based on ${apiKeyCount} API keys.`);
+import { Worker } from 'bullmq';
+import redisConnection from '../redis.mjs';
+import * as db from '../database-postgres.js';
+import { summarizeArticleTask, semanticCheckTask } from '../task.js';
+import { retry, Logger, EMOJIS } from '../utils.js';
 
-new Worker(
-  "semantic-summary",
-  async (job) => {
-    const { articleId, userId } = job.data;
-    console.log(`[Semantic Worker] Processing articleId: ${articleId}`);
+const logger = new Logger('Semantic Worker', 'magenta', EMOJIS.semantic);
+const bullLogger = new Logger('BullMQ', 'red', EMOJIS.bull);
 
+
+const worker = new Worker('semantic-summary', async (job) => {
+    const { articleId, userTopic, language } = job.data;
+    logger.info(`Job ${job.id}: Processing articleId ${articleId}`);
+
+    let article;
     try {
-      const user = await getUserById(userId); // Fetch user to get language
-      if (!user || !user.language) {
-          throw new Error(`User or user language not found for userId: ${userId}`);
-      }
+        // 1. Get the full article from the database
+        article = await db.getArticle(articleId);
+        if (!article || !article.content) {
+            throw new Error(`Article ${articleId} or its content is missing from the database.`);
+        }
 
-      const article = await getJobArticle(articleId);
-      if (!article || !article.content) {
-        throw new Error(`Article or article content not found for id: ${articleId}`);
-      }
+        // 2. Perform the semantic check first to see if the article is relevant
+        logger.info(`Starting semantic check for: ${article.link} (Lang: ${language})`);
+        const semanticCheckResult = await retry(
+            () => semanticCheckTask({ data: { article, userTopic, language } }), 
+            2, 
+            2000
+        );
 
-      const userTopic = await getTopicByUserId(userId);
-      if (!userTopic) {
-        throw new Error(`User topic not found for user: ${userId}`);
-      }
+        const { is_relevant, reason } = semanticCheckResult;
+        logger.info(`Article ${articleId} is ${is_relevant ? '' : 'NOT '}relevant. Reason: ${reason}`);
 
-      const articleForTask = {
-        link: article.link,
-        title: article.title,
-        articleText: article.content
-      };
+        // 3. If not relevant, update and stop.
+        if (!is_relevant) {
+            await db.updateArticleSemanticRelevance(articleId, false, reason);
+            logger.info(`Job ${job.id}: Finished. Article marked as not relevant.`);
+            return { success: true, relevant: false };
+        }
 
-      const semanticResult = await semanticCheckTask({ data: { article: articleForTask, userTopic, language: user.language } }); // Pass language
-
-      if (semanticResult.is_relevant) {
-        console.log(`[Semantic Worker] ✅ RELEVANT: Article ${articleId} is relevant. Reason: ${semanticResult.reason}. Summarizing...`);
-        const summaryResult = await summarizeArticleTask({ data: { article: articleForTask, language: user.language } }); // Pass language
+        // 4. If relevant, proceed with summarization.
+        logger.info(`Starting summary for relevant article: ${article.link}`);
         
-        await updateArticle(articleId, summaryResult.summary, 'completed', semanticResult.reason);
+        const jobInfo = await db.getJob(article.job_id);
+        const summaryStyle = jobInfo.summary_style || 'paragraph';
+        
+        const summaryResult = await retry(
+            () => summarizeArticleTask({ data: { article, language, style: summaryStyle } }),
+            3,
+            2000
+        );
+        const { summary } = summaryResult;
 
-      } else {
-        console.log(`[Semantic Worker] Article ${articleId} is NOT relevant. Reason: ${semanticResult.reason}`);
-        await updateArticle(articleId, '', 'rejected', semanticResult.reason);
-      }
+        // 5. Update the database with all the results.
+        logger.info(`Job ${job.id}: Saving final results to database for article ${articleId}.`);
+        await db.updateArticleSummary(articleId, summary);
+        await db.updateArticleSemanticRelevance(articleId, true, reason); // This sets status to 'completed'
 
-      // Check if the parent job is now complete
-      const pendingCount = await getPendingArticlesCountForJob(article.job_id);
-      if (pendingCount === 0) {
-        console.log(`[Semantic Worker] Job ${article.job_id} has no more pending articles. Marking as complete.`);
-        await updateJobStatus(article.job_id, 'completed');
-      }
+        logger.info(`Job ${job.id}: Successfully processed and saved article ${articleId}.`);
+        return { success: true, relevant: true };
 
-    } catch (error) {
-      console.error(`[Semantic Worker] FAILED for articleId: ${articleId}`, error);
-      await updateArticle(articleId, '', 'failed');
+    } catch (err) {
+        logger.error(`Job ${job.id}: CRITICAL ERROR processing article ${articleId}.`, err);
+        if (articleId) {
+            await db.updateArticleStatus(articleId, 'failed', err.message);
+        }
+        throw err; // Let BullMQ know the job failed
     }
-  },
-  { connection, concurrency: concurrency }
-);
+}, { 
+    connection: redisConnection,
+    concurrency: 4 // As requested by the user
+});
+
+worker.on('completed', (job, result) => {
+    bullLogger.info(`Job ${job.id} in 'semantic-summary' has completed. Relevant: ${result.relevant}`);
+});
+
+worker.on('failed', (job, err) => {
+    bullLogger.error(`Job ${job.id} in 'semantic-summary' has failed.`, err);
+});
+
+logger.info('Worker started and listening for jobs.');
+
+// Graceful shutdown
+const gracefulShutdown = async () => {
+    logger.warn('Shutting down gracefully...');
+    await worker.close();
+    process.exit(0);
+};
+
+process.on('SIGTERM', gracefulShutdown);
+process.on('SIGINT', gracefulShutdown);

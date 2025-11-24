@@ -1,163 +1,224 @@
+
 <!DOCTYPE html>
 <html lang="de">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Personalization - Synapse Summarizer</title>
-    
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
-    
+    <title>Personalisierung - Saphire</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        #ai-feedback-container {
+            margin-top: -0.75rem;
+            margin-bottom: 1rem;
+            padding: 1rem 1.25rem;
+            border: 1px solid var(--saphir-green);
+            background: color-mix(in srgb, var(--saphir-green) 10%, transparent);
+            border-radius: 0 0 var(--radius-md) var(--radius-md);
+            transform-origin: top center;
+            transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            opacity: 0; transform: scaleY(0.9);
+            max-height: 0; overflow: hidden;
+        }
+        #ai-feedback-container.visible {
+            opacity: 1; transform: scaleY(1);
+            max-height: 500px; /* Allow space to grow */
+            border-top: none;
+        }
+        #ai-feedback-text {
+            display: flex; align-items: center; gap: 0.75rem;
+            margin-bottom: 0.75rem;
+        }
+        #ai-feedback-text::before {
+            content: '💡'; font-size: 1.5rem;
+        }
+        #ai-suggestion-buttons {
+            display: flex; flex-wrap: wrap; gap: 0.5rem;
+            margin-top: 0.5rem;
+        }
+        .suggestion-btn {
+            padding: 0.4rem 0.8rem;
+            font-size: 0.85rem;
+            font-weight: 500;
+            background-color: color-mix(in srgb, var(--saphir-blue) 30%, transparent);
+            border: 1px solid var(--saphir-blue);
+            color: var(--color-text-primary);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        .suggestion-btn:hover {
+            background-color: var(--saphir-blue);
+            transform: translateY(-2px);
+        }
+    </style>
 </head>
 <body>
+    <div class="container">
+        <div class="header">
+            <h1 id="welcome-message">Personalisierung</h1>
+            <nav class="header-nav">
+                <a href="/">Home</a>
+                <a href="#" id="logout-btn">Logout</a>
+            </nav>
+        </div>
 
-    <div id="app-container">
-        <nav class="navbar">
-            <span class="navbar-brand">SYNAPSE</span>
-            <div>
-                <a href="/" class="btn-ghost">Back to Dashboard</a>
-                <span class="navbar-text" style="margin-left: 1rem;">User: <strong id="username-display"></strong></span>
-                <button id="logoutBtn" class="btn btn-outline-danger btn-sm">Logout</button>
-            </div>
-        </nav>
-
-        <main>
-            <div class="card-ui" style="max-width: 600px; margin: 2rem auto;">
-                <h1 class="card-ui-title" style="text-align: left;">Personalize Your News</h1>
-                <p class="card-ui-subtitle" style="text-align: left;">
-                    Stellen Sie hier Ihr persönliches Nachrichtenthema ein. Dies wird für die automatische Erstellung Ihrer Zusammenfassungen verwendet.
-                </p>
-
-                <div id="alert-container" class="mt-3" style="display: none;"></div>
-
-                <form id="topicForm">
-                    <div class="mb-3">
-                        <label for="main_topic" class="form-label">Über was möchtest du dich in diesem dashboard informiern lassen?</label>
-                        <input type="text" class="form-control" id="main_topic" placeholder="z.B. Künstliche Intelligenz" required>
-                    </div>
-                    <div class="mb-3">
-                        <label for="include_keywords" class="form-label">Erzwinge diese Schlüsselwörter (optional, mit Komma trennen)</label>
-                        <input type="text" class="form-control" id="include_keywords" placeholder="z.B. GPT-4, LLMs, Bildgenerierung">
-                        <small class="form-text text-muted" style="color: var(--color-text-secondary); font-size: var(--fs-sm);">
-                            Nachrichten müssen mindestens eines dieser Wörter enthalten.
-                        </small>
-                    </div>
-                    <div class="mb-4">
-                        <label for="exclude_keywords" class="form-label">Schließe diese Schlüsselwörter aus (optional, mit Komma trennen)</label>
-                        <input type="text" class="form-control" id="exclude_keywords" placeholder="z.B. Aktien, Klatsch, Sport">
-                         <small class="form-text text-muted" style="color: var(--color-text-secondary); font-size: var(--fs-sm);">
-                            Nachrichten, die diese Wörter enthalten, werden ignoriert.
-                        </small>
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Preferences</button>
-                </form>
-                <div class="mt-4">
-                    <button id="clearDbBtn" class="btn btn-danger w-100">Clear Database</button>
+        <div id="personalization-content">
+            <h2>Ihre Forschungsinteressen</h2>
+            <p>Definieren Sie hier Ihre Interessen. Nach dem Speichern gibt die KI Ihnen Feedback, um Ihr Thema zu perfektionieren.</p>
+            <form id="topic-form">
+                <div class="form-group">
+                    <label for="main-topic">Hauptthema</label>
+                    <input type="text" id="main-topic" name="main_topic" required placeholder="z.B. 'Künstliche Intelligenz in der Medizin'">
                 </div>
-            </div>
-        </main>
+                 <!-- AI Feedback Box -->
+                <div id="ai-feedback-container">
+                    <p id="ai-feedback-text"></p>
+                    <div id="ai-suggestion-buttons"></div>
+                </div>
+                <div class="form-group">
+                    <label for="include-keywords">Schlüsselwörter (muss enthalten sein, mit Komma trennen)</label>
+                    <input type="text" id="include-keywords" name="include_keywords" placeholder="z.B. 'Diagnostik, Bildgebung'">
+                </div>
+                <div class="form-group">
+                    <label for="exclude-keywords">Schlüsselwörter (muss ausgeschlossen werden, mit Komma trennen)</label>
+                    <input type="text" id="exclude-keywords" name="exclude_keywords" placeholder="z.B. 'Verwaltung, Abrechnung'">
+                </div>
+                <button type="submit" class="btn">Speichern & Analysieren</button>
+            </form>
+            <div id="message-container" class="hidden"></div>
+        </div>
     </div>
-    
+
     <script>
-        document.addEventListener('DOMContentLoaded', () => {
-            const usernameDisplay = document.getElementById('username-display');
-            const logoutBtn = document.getElementById('logoutBtn');
-            const topicForm = document.getElementById('topicForm');
-            const mainTopicInput = document.getElementById('main_topic');
-            const includeKeywordsInput = document.getElementById('include_keywords');
-            const excludeKeywordsInput = document.getElementById('exclude_keywords');
-            const alertContainer = document.getElementById('alert-container');
-            const clearDbBtn = document.getElementById('clearDbBtn');
+        document.addEventListener('DOMContentLoaded', async () => {
+            const topicForm = document.getElementById('topic-form');
+            const mainTopicInput = document.getElementById('main-topic');
+            const includeKeywordsInput = document.getElementById('include-keywords');
+            const excludeKeywordsInput = document.getElementById('exclude-keywords');
+            const aiFeedbackContainer = document.getElementById('ai-feedback-container');
+            const aiFeedbackText = document.getElementById('ai-feedback-text');
+            const aiSuggestionButtons = document.getElementById('ai-suggestion-buttons');
 
-            const api = {
-                async request(endpoint, options = {}) {
-                    options.credentials = 'include';
-                    options.headers = { 'Content-Type': 'application/json', ...options.headers };
-                    const res = await fetch(`/api${endpoint}`, options);
-                    if (!res.ok) {
-                        const errorData = await res.json().catch(() => ({ error: 'An unknown error occurred' }));
-                        throw errorData;
-                    }
-                    return res.json();
-                },
-                getUser() { return this.request('/user'); },
-                logout() { return this.request('/logout', { method: 'POST' }); },
-                getTopics() { return this.request('/topics'); },
-                saveTopics(data) { return this.request('/topics', { method: 'POST', body: JSON.stringify(data) }); },
-                clearDatabase() { return this.request('/clear-database', { method: 'POST' }); }
-            };
+            // --- Initial Data Load ---
+            try {
+                const [userRes, topicRes] = await Promise.all([ fetch('/api/user'), fetch('/api/topics') ]);
+                if (!userRes.ok) { window.location.href = '/'; return; }
+                const user = await userRes.json();
+                document.getElementById('welcome-message').textContent = `Personalisierung für ${user.username}`;
 
-            const showAlert = (message, type = 'danger') => {
-                alertContainer.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
-                alertContainer.style.display = 'block';
-                setTimeout(() => {
-                    alertContainer.style.display = 'none';
-                }, 4000);
-            };
-
-            logoutBtn.addEventListener('click', async () => {
-                try {
-                    await api.logout();
-                    window.location.href = '/';
-                } catch (err) {
-                    console.error('Logout failed', err);
-                }
-            });
-
-            clearDbBtn.addEventListener('click', async () => {
-                if (confirm('Are you sure you want to clear the entire database? This action cannot be undone.')) {
-                    try {
-                        const result = await api.clearDatabase();
-                        showAlert(result.message, 'success');
-                    } catch (err) {
-                        showAlert(err.error || 'Failed to clear database.');
-                    }
-                }
-            });
-
-            topicForm.addEventListener('submit', async (e) => {
-                e.preventDefault();
-                const data = {
-                    main_topic: mainTopicInput.value.trim(),
-                    include_keywords: includeKeywordsInput.value.trim(),
-                    exclude_keywords: excludeKeywordsInput.value.trim()
-                };
-
-                if (!data.main_topic) {
-                    showAlert('Das Hauptthema ist erforderlich.');
-                    return;
-                }
-
-                try {
-                    const result = await api.saveTopics(data);
-                    showAlert(result.message, 'success');
-                } catch (err) {
-                    showAlert(err.error || 'Failed to save preferences.');
-                }
-            });
-
-            const loadData = async () => {
-                try {
-                    const user = await api.getUser();
-                    usernameDisplay.textContent = user.username;
-                    
-                    const topic = await api.getTopics();
+                if (topicRes.ok) {
+                    const topic = await topicRes.json();
                     if (topic) {
                         mainTopicInput.value = topic.main_topic || '';
                         includeKeywordsInput.value = topic.include_keywords || '';
                         excludeKeywordsInput.value = topic.exclude_keywords || '';
                     }
+                } else { displayMessage('Thema konnte nicht geladen werden.', 'error'); }
+            } catch (error) { displayMessage('Fehler beim Laden der Seite.', 'error'); }
 
-                } catch (err) {
-                    // This will be caught by the 401 redirect in api.request
-                    console.error('Failed to load initial data', err);
+            // --- AI Topic Interrogation Logic ---
+            const interrogateTopic = async () => {
+                const userTopic = {
+                    main_topic: mainTopicInput.value,
+                    include_keywords: includeKeywordsInput.value,
+                    exclude_keywords: excludeKeywordsInput.value
+                };
+
+                if (!userTopic.main_topic.trim()) {
+                    aiFeedbackContainer.classList.remove('visible');
+                    return;
+                }
+
+                try {
+                    const res = await fetch('/api/interrogate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(userTopic)
+                    });
+                    if (!res.ok) throw new Error('AI-Analyse fehlgeschlagen');
+                    
+                    const data = await res.json();
+                    aiSuggestionButtons.innerHTML = ''; // Clear old buttons
+
+                    if (data.needsClarification && data.suggestions?.length) {
+                        aiFeedbackText.textContent = data.question;
+                        aiFeedbackContainer.style.borderColor = 'var(--saphir-blue)';
+                        aiFeedbackContainer.style.background = 'color-mix(in srgb, var(--saphir-blue) 10%, transparent)';
+                        
+                        data.suggestions.forEach(suggestion => {
+                            const btn = document.createElement('button');
+                            btn.textContent = suggestion;
+                            btn.className = 'suggestion-btn';
+                            btn.type = 'button'; // Prevent form submission
+                            btn.onclick = () => {
+                                mainTopicInput.value = suggestion;
+                                aiFeedbackContainer.classList.remove('visible');
+                                // Instantly save and re-check the new, better topic
+                                topicForm.dispatchEvent(new Event('submit', { cancelable: true }));
+                            };
+                            aiSuggestionButtons.appendChild(btn);
+                        });
+
+                    } else {
+                        aiFeedbackText.textContent = 'Dieses Thema ist spezifisch genug für eine gute Suche!';
+                        aiFeedbackContainer.style.borderColor = 'var(--saphir-green)';
+                        aiFeedbackContainer.style.background = 'color-mix(in srgb, var(--saphir-green) 10%, transparent)';
+                    }
+                    aiFeedbackContainer.classList.add('visible');
+
+                } catch (error) {
+                    console.error('Error during topic interrogation:', error);
+                    aiFeedbackContainer.classList.remove('visible');
                 }
             };
 
-            loadData();
+            // --- Form Submission Handler ---
+            topicForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const submitButton = topicForm.querySelector('button[type="submit"]');
+                submitButton.disabled = true;
+                const originalButtonText = submitButton.textContent;
+                submitButton.textContent = 'Speichere...';
+
+                try {
+                    const response = await fetch('/api/topics', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            main_topic: mainTopicInput.value,
+                            include_keywords: includeKeywordsInput.value,
+                            exclude_keywords: excludeKeywordsInput.value
+                        })
+                    });
+                    
+                    if (!response.ok) throw new Error('Speichern fehlgeschlagen');
+                    displayMessage('Thema erfolgreich gespeichert!', 'success');
+                    
+                    // Now run the AI analysis
+                    submitButton.textContent = 'Analysiere...';
+                    await interrogateTopic();
+
+                } catch (error) {
+                    displayMessage(`Fehler: ${error.message}`, 'error');
+                } finally {
+                    submitButton.disabled = false;
+                    submitButton.textContent = originalButtonText;
+                }
+            });
+
+            // --- Logout & Messaging ---
+            document.getElementById('logout-btn').addEventListener('click', async () => {
+                try { await fetch('/api/logout', { method: 'POST' }); }
+                finally { window.location.href = '/'; }
+            });
+
+            function displayMessage(message, type) {
+                const container = document.getElementById('message-container');
+                container.textContent = message;
+                container.className = 'message-box ' + (type === 'success' ? 'success-message' : 'error-message');
+                container.classList.remove('hidden');
+                setTimeout(() => container.classList.add('hidden'), 5000);
+            }
         });
     </script>
 </body>

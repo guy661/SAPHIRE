@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Saphire</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <div class="container">
+
+        <!-- Login/Register View -->
+        <div id="auth-view">
+            <div id="login-form-container" class="form-container fade-in">
+                <h2>Login</h2>
+                <form id="login-form" class="auth-form">
+                    <input type="text" id="login-username" placeholder="Username" required>
+                    <input type="password" id="login-password" placeholder="Passwort" required>
+                    <button type="submit">Login</button>
+                    <p>Noch kein Account? <a href="#" id="show-register-link">Registrieren</a></p>
+                </form>
+            </div>
+
+            <div id="register-form-container" class="form-container hidden">
+                <h2>Registrieren</h2>
+                <form id="register-form" class="auth-form">
+                    <input type="text" id="register-username" placeholder="Username" required>
+                    <input type="password" id="register-password" placeholder="Passwort" required>
+                    <select id="register-language">
+                        <option value="de">Deutsch</option>
+                        <option value="en">English</option>
+                    </select>
+                    <button type="submit">Registrieren</button>
+                     <p>Bereits einen Account? <a href="#" id="show-login-link">Login</a></p>
+                </form>
+            </div>
+             <div id="auth-message" class="hidden"></div>
+        </div>
+
+        <!-- Main App View -->
+        <div id="app-view" class="hidden">
+            <div class="header">
+                 <h1 id="welcome-message">Willkommen!</h1>
+                <nav class="header-nav">
+                    <a href="/personalization">Personalisierung</a>
+                    <a href="#" id="logout-btn">Logout</a>
+                </nav>
+            </div>
+           
+            <div id="dashboard">
+                <div class="dashboard-controls">
+                    <div class="form-group">
+                        <label for="summary-style">Stil der Zusammenfassung</label>
+                        <select id="summary-style">
+                            <option value="paragraph" selected>Absatz</option>
+                            <option value="bullets">Stichpunkte</option>
+                        </select>
+                    </div>
+                    <button id="start-search-btn" class="btn">Starte die Artikelsuche</button>
+                </div>
+                <div id="spinner" class="spinner hidden"></div>
+                <div id="articles-container"></div>
+                 <div id="job-status-message" class="hidden"></div>
+            </div>
+        </div>
+    </div>
+
+
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    const authView = document.getElementById('auth-view');
+    const appView = document.getElementById('app-view');
+    const loginFormContainer = document.getElementById('login-form-container');
+    const registerFormContainer = document.getElementById('register-form-container');
+    const loginForm = document.getElementById('login-form');
+    const registerForm = document.getElementById('register-form');
+    const showRegisterLink = document.getElementById('show-register-link');
+    const showLoginLink = document.getElementById('show-login-link');
+    const authMessage = document.getElementById('auth-message');
+    const welcomeMessage = document.getElementById('welcome-message');
+    const logoutBtn = document.getElementById('logout-btn');
+    const startSearchBtn = document.getElementById('start-search-btn');
+    const spinner = document.getElementById('spinner');
+    const articlesContainer = document.getElementById('articles-container');
+    const jobStatusMessage = document.getElementById('job-status-message');
+    const summaryStyleSelect = document.getElementById('summary-style');
+
+    let pollInterval;
+
+    // =================================================================
+    // Initial Check for Session
+    // =================================================================
+    (async function checkSession() {
+        try {
+            const res = await fetch('/api/user');
+            if (res.ok) {
+                const user = await res.json();
+                showAppView(user);
+            } else {
+                showAuthView();
+            }
+        } catch (error) {
+            console.error("Session check failed:", error);
+            showAuthView();
+        }
+    })();
+
+    // =================================================================
+    // View Toggling
+    // =================================================================
+    function showAuthView() {
+        authView.classList.remove('hidden');
+        appView.classList.add('hidden');
+        if (pollInterval) clearInterval(pollInterval);
+    }
+
+    function showAppView(user) {
+        welcomeMessage.textContent = `Willkommen, ${user.username}!`;
+        // Quick fade out of auth view and fade in of app view
+        authView.style.transition = 'opacity 0.3s ease-out';
+        authView.style.opacity = '0';
+        setTimeout(() => {
+            authView.classList.add('hidden');
+            appView.classList.remove('hidden');
+            appView.style.opacity = '0';
+            setTimeout(() => {  appView.style.transition = 'opacity 0.5s ease-in'; appView.style.opacity = '1'; }, 50);
+        }, 300);
+    }
+    
+    function switchAuthForm(show, hide) {
+        hide.classList.add('fade-out');
+        authMessage.classList.add('hidden');
+
+        setTimeout(() => {
+            hide.classList.add('hidden');
+            hide.classList.remove('fade-out');
+            
+            show.classList.remove('hidden');
+            // A tiny delay to allow the DOM to update before adding the fade-in class
+            setTimeout(() => {
+                show.classList.add('fade-in');
+            }, 10);
+
+        }, 500); // This timeout should match the animation duration in CSS
+    }
+
+    showRegisterLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthForm(registerFormContainer, loginFormContainer);
+    });
+
+    showLoginLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        switchAuthForm(loginFormContainer, registerFormContainer);
+    });
+
+
+    // =================================================================
+    // Authentication Logic
+    // =================================================================
+    loginForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = document.getElementById('login-username').value;
+        const password = document.getElementById('login-password').value;
+        try {
+            const res = await fetch('/api/login', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showAppView(data);
+            } else {
+                displayAuthMessage(data.error || 'Login fehlgeschlagen.', 'error');
+            }
+        } catch (error) {
+            displayAuthMessage('Netzwerkfehler beim Login.', 'error');
+        }
+    });
+
+    registerForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const username = document.getElementById('register-username').value;
+        const password = document.getElementById('register-password').value;
+        const language = document.getElementById('register-language').value;
+        try {
+            const res = await fetch('/api/register', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username, password, language }),
+            });
+            const data = await res.json();
+            if (res.ok) {
+                showAppView(data);
+            } else {
+                displayAuthMessage(data.error || 'Registrierung fehlgeschlagen.', 'error');
+            }
+        } catch (error) {
+            displayAuthMessage('Netzwerkfehler bei der Registrierung.', 'error');
+        }
+    });
+
+    logoutBtn.addEventListener('click', async () => {
+        try {
+            await fetch('/api/logout', { method: 'POST' });
+        } finally {
+            // Reverse the app view transition
+            appView.style.transition = 'opacity 0.3s ease-out';
+            appView.style.opacity = '0';
+            setTimeout(() => {
+                showAuthView();
+                appView.style.opacity = '1'; // Reset for next time
+                 // Reset forms to default
+                switchAuthForm(loginFormContainer, registerFormContainer);
+            }, 300);
+        }
+    });
+
+    function displayAuthMessage(message, type) {
+        authMessage.textContent = message;
+        authMessage.className = 'message-box ' + (type === 'success' ? 'success-message' : 'error-message');
+        authMessage.classList.remove('hidden');
+    }
+
+
+    // =================================================================
+    // Main App Logic
+    // =================================================================
+    startSearchBtn.addEventListener('click', async () => {
+        startSearchBtn.disabled = true;
+        spinner.classList.remove('hidden');
+        articlesContainer.innerHTML = '';
+        jobStatusMessage.classList.add('hidden');
+        const summaryStyle = summaryStyleSelect.value;
+
+        try {
+            const res = await fetch('/api/rss', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ summaryStyle })
+            });
+
+            if (!res.ok) {
+                const data = await res.json();
+                throw new Error(data.error || "Unbekannter Fehler beim Start der Suche.");
+            }
+            
+            const data = await res.json();
+
+            if (data.status === 'clarification_needed') {
+                // The AI needs more information, redirect to the clarification page.
+                window.location.href = '/clarification';
+                return;
+            }
+
+            if (data.jobId) {
+                displayJobStatus(`Suche gestartet (Job ID: ${data.jobId}). Ergebnisse werden geladen...`, 'success');
+                pollJobStatus(data.jobId);
+            } else {
+                displayJobStatus(data.message || 'Keine neuen Artikel für Ihr Thema gefunden.', 'success');
+                spinner.classList.add('hidden');
+                startSearchBtn.disabled = false;
+            }
+
+        } catch (error) {
+            displayJobStatus(`Fehler: ${error.message}`, 'error');
+            spinner.classList.add('hidden');
+            startSearchBtn.disabled = false;
+        }
+    });
+
+    function pollJobStatus(jobId) {
+        if (pollInterval) clearInterval(pollInterval);
+
+        pollInterval = setInterval(async () => {
+            try {
+                const res = await fetch(`/api/job/${jobId}`);
+                if (!res.ok) {
+                    throw new Error("Serverfehler beim Abrufen des Jobstatus.");
+                }
+                
+                const data = await res.json();
+                renderArticles(data.articles);
+
+                if (data.status === 'completed' || data.status === 'failed') {
+                    clearInterval(pollInterval);
+                    spinner.classList.add('hidden');
+                    startSearchBtn.disabled = false;
+                    const relevantCount = data.articles.filter(a => a.is_relevant).length;
+                    displayJobStatus(`Suche abgeschlossen. ${relevantCount} relevante Artikel gefunden.`, 'success');
+                }
+
+            } catch (error) {
+                clearInterval(pollInterval);
+                displayJobStatus(`Fehler beim Abrufen der Ergebnisse: ${error.message}`, 'error');
+                spinner.classList.add('hidden');
+                startSearchBtn.disabled = false;
+            }
+        }, 3000); // Poll every 3 seconds
+    }
+    
+    function displayJobStatus(message, type) {
+        jobStatusMessage.textContent = message;
+        jobStatusMessage.className = 'message-box ' + (type === 'success' ? 'success-message' : 'error-message');
+        jobStatusMessage.classList.remove('hidden');
+    }
+
+    function renderArticles(articles) {
+        const relevantArticles = articles.filter(a => a.is_relevant);
+
+        if (relevantArticles.length === 0 && !spinner.classList.contains('hidden')) {
+             articlesContainer.innerHTML = '<p>Bisher keine relevanten Artikel gefunden. Die Suche läuft noch...</p>';
+            return;
+        }
+        
+        // Track already rendered articles to prevent re-rendering and re-animating them
+        const existingArticleLinks = new Set([...articlesContainer.querySelectorAll('.article h3 a')].map(a => a.href));
+        
+        let newArticlesRendered = false;
+        relevantArticles.forEach((article, index) => {
+            if (existingArticleLinks.has(article.link)) {
+                return; // Skip already rendered article
+            }
+            newArticlesRendered = true;
+
+            const articleEl = document.createElement('div');
+            articleEl.classList.add('article');
+            // Set the custom property for staggered animation
+            articleEl.style.setProperty('--i', index);
+            
+            let summaryHtml = article.summary.includes('- ') 
+                ? '<ul>' + article.summary.split('\n').map(line => `<li>${line.replace(/^- /, '')}</li>`).join('') + '</ul>'
+                : `<p>${article.summary}</p>`;
+
+            articleEl.innerHTML = `
+                <h3><a href="${article.link}" target="_blank" rel="noopener noreferrer">${article.title}</a></h3>
+                <p class="article-meta">Veröffentlicht: ${new Date(article.pub_date).toLocaleString()}</p>
+                <div class="article-summary">
+                    <strong>Zusammenfassung:</strong>
+                    ${summaryHtml}
+                </div>
+            `;
+            articlesContainer.appendChild(articleEl);
+        });
+
+        // If we only added new articles (didn't wipe the container), remove the placeholder
+        if(newArticlesRendered && articlesContainer.querySelector('p')) {
+             articlesContainer.querySelector('p').remove();
+        }
+    }
+});
+</script>
+
+</body>
+</html>
