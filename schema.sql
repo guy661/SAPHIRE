@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS topics (
     main_topic TEXT NOT NULL,
     include_keywords TEXT,
     exclude_keywords TEXT,
+    specification TEXT,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
