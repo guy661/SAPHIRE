@@ -11,6 +11,28 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     
     <link rel="stylesheet" href="/style.css">
+    <style>
+        .modal-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.6);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        .modal-content {
+            background-color: var(--color-background);
+            padding: 2rem;
+            border-radius: var(--radius-md);
+            max-width: 500px;
+            width: 90%;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+        }
+    </style>
 </head>
 <body>
 
@@ -39,23 +61,36 @@
                         <input type="text" class="form-control" id="main_topic" placeholder="z.B. Künstliche Intelligenz" required>
                     </div>
                     <div class="mb-3">
-                        <label for="include_keywords" class="form-label">Erzwinge diese Schlüsselwörter (optional, mit Komma trennen)</label>
+                        <label for="include_keywords" class="form-label">Unterthemen, die sie besonders interessieren (optional, mit Komma trennen)</label>
                         <input type="text" class="form-control" id="include_keywords" placeholder="z.B. GPT-4, LLMs, Bildgenerierung">
                         <small class="form-text text-muted">
                             Nachrichten müssen mindestens eines dieser Wörter enthalten.
                         </small>
                     </div>
                     <div class="mb-4">
-                        <label for="exclude_keywords" class="form-label">Schließe diese Schlüsselwörter aus (optional, mit Komma trennen)</label>
+                        <label for="exclude_keywords" class="form-label">Unterthemen die man nicht haben will (optional, mit Komma trennen)</label>
                         <input type="text" class="form-control" id="exclude_keywords" placeholder="z.B. Aktien, Klatsch, Sport">
                          <small class="form-text text-muted">
                             Nachrichten, die diese Wörter enthalten, werden ignoriert.
                         </small>
                     </div>
-                    <button type="submit" class="btn btn-primary w-100">Save Topic Settings</button>
+                    <button type="submit" class="btn btn-primary w-100">Speichern & Analysieren</button>
                 </form>
             </div>
         </main>
+    </div>
+
+    <div id="ai-clarification-modal" class="modal-overlay" style="display: none;">
+        <div class="modal-content">
+            <h3 id="modal-question"></h3>
+            <p>Ihre Eingabe hilft der KI, die Suche für Sie zu verfeinern.</p>
+            <form id="clarification-form">
+                <div class="form-group">
+                    <input type="text" id="clarification-input" class="form-control" placeholder="Ihre Antwort...">
+                </div>
+                <button type="submit" class="btn">Thema Spezifizieren</button>
+            </form>
+        </div>
     </div>
     
     <script>
@@ -67,6 +102,11 @@
             const includeKeywordsInput = document.getElementById('include_keywords');
             const excludeKeywordsInput = document.getElementById('exclude_keywords');
             const alertContainer = document.getElementById('alert-container');
+
+            const modal = document.getElementById('ai-clarification-modal');
+            const modalQuestion = document.getElementById('modal-question');
+            const clarificationForm = document.getElementById('clarification-form');
+            const clarificationInput = document.getElementById('clarification-input');
 
             const api = {
                 async request(endpoint, options = {}) {
@@ -102,13 +142,54 @@
                 }
             });
 
+            const interrogateTopic = async () => {
+                const userTopic = {
+                    main_topic: mainTopicInput.value,
+                    include_keywords: includeKeywordsInput.value,
+                    exclude_keywords: excludeKeywordsInput.value
+                };
+
+                if (!userTopic.main_topic.trim()) return;
+
+                try {
+                    const res = await fetch('/api/interrogate', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(userTopic)
+                    });
+                    if (!res.ok) throw new Error('AI-Analyse fehlgeschlagen');
+                    
+                    const data = await res.json();
+
+                    if (data.needsClarification) {
+                        modalQuestion.textContent = data.question;
+                        clarificationInput.value = mainTopicInput.value;
+                        modal.style.display = 'flex';
+                    } else {
+                        showAlert('Dieses Thema ist spezifisch genug für eine gute Suche!', 'success');
+                    }
+
+                } catch (error) {
+                    console.error('Error during topic interrogation:', error);
+                    showAlert('Fehler bei der AI-Analyse.', 'danger');
+                }
+            };
+
+            clarificationForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                mainTopicInput.value = clarificationInput.value;
+                modal.style.display = 'none';
+                topicForm.dispatchEvent(new Event('submit', { cancelable: true }));
+            });
+
             topicForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
-                // First, get the existing settings to not overwrite them
-                const currentSettings = await api.getTopics();
-                
+                const submitButton = topicForm.querySelector('button[type="submit"]');
+                const originalButtonText = submitButton.textContent;
+                submitButton.disabled = true;
+                submitButton.textContent = 'Speichere...';
+
                 const data = {
-                    ...currentSettings,
                     main_topic: mainTopicInput.value.trim(),
                     include_keywords: includeKeywordsInput.value.trim(),
                     exclude_keywords: excludeKeywordsInput.value.trim()
@@ -116,14 +197,23 @@
 
                 if (!data.main_topic) {
                     showAlert('Das Hauptthema ist erforderlich.');
+                    submitButton.disabled = false;
+                    submitButton.textContent = originalButtonText;
                     return;
                 }
 
                 try {
                     const result = await api.saveTopics(data);
                     showAlert(result.message, 'success');
+                    
+                    submitButton.textContent = 'Feedback wird geladen...';
+                    await interrogateTopic();
+
                 } catch (err) {
                     showAlert(err.error || 'Failed to save preferences.');
+                } finally {
+                    submitButton.disabled = false;
+                    submitButton.textContent = originalButtonText;
                 }
             });
 

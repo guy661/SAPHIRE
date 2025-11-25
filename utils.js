@@ -1,52 +1,99 @@
 require('dotenv').config();
-const fetch = require('node-fetch');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
-async function retry(fn, retries = 5, delay = 1000) {
-    try {
-        return await fn();
-    } catch (err) {
-        if (retries > 0) {
-            await new Promise(resolve => setTimeout(resolve, delay));
-            return retry(fn, retries - 1, delay * 2);
+const COLORS = {
+    red: '\x1b[31m',
+    green: '\x1b[32m',
+    yellow: '\x1b[33m',
+    blue: '\x1b[34m',
+    magenta: '\x1b[35m',
+    cyan: '\x1b[36m',
+    white: '\x1b[37m',
+    reset: '\x1b[0m'
+};
+
+const EMOJIS = {
+    info: '✅',
+    warn: '⚠️',
+    error: '❌',
+    debug: '🐞',
+    fetch: '📥',
+    semantic: '🧠',
+    db: '🐘',
+    server: '🚀',
+    task: '🛠️',
+    bull: '🐂'
+};
+
+class Logger {
+    constructor(prefix, color = 'white', emoji = '') {
+        this.prefix = prefix;
+        this.color = COLORS[color] || COLORS.white;
+        this.emoji = emoji;
+    }
+
+    _log(level, message) {
+        const timestamp = new Date().toLocaleTimeString();
+        console.log(`[${this.prefix}] ${this.emoji} [${timestamp}] ${message}`);
+    }
+
+    info(message) {
+        this._log('INFO', message);
+    }
+
+    warn(message) {
+        console.warn(`[${this.prefix}] ${this.emoji} [${new Date().toLocaleTimeString()}] [WARN] ${message}`);
+    }
+
+    error(message, errorObj = null) {
+        const errorMessage = errorObj ? `${message} | Stack: ${errorObj.stack}` : message;
+        console.error(`[${this.prefix}] ${this.emoji} [${new Date().toLocaleTimeString()}] [ERROR] ${errorMessage}`);
+    }
+
+    debug(message) {
+        if (process.env.NODE_ENV === 'development') {
+            this._log('DEBUG', message);
         }
-        throw err;
     }
 }
 
-async function callGemini(prompt) {
-    const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
-    const controller = new AbortController();
-    const id = setTimeout(() => controller.abort(), 15000); // 15 seconds timeout
-    const response = await fetch(geminiApiUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-        signal: controller.signal
-    }).finally(() => clearTimeout(id));
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini API Error: ${response.status} - ${errorText}`);
-    }
-    const data = await response.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+const apiKeys = (process.env.GEMINI_API_KEYS || '').split(',').filter(Boolean);
+const apiInstances = apiKeys.map(key => new GoogleGenerativeAI(key));
+let apiKeyIndex = 0;
+
+function getApiKeyCount() {
+    return apiKeys.length;
 }
 
-async function processInBatches(items, taskFn, batchSize, delay) {
-    let results = [];
-    for (let i = 0; i < items.length; i += batchSize) {
-        const batch = items.slice(i, i + batchSize);
-        console.log(`[Batch] Processing batch of ${batch.length} items...`);
-        
-        const promises = batch.map(item => taskFn(item));
-        const batchResults = await Promise.allSettled(promises);
-        results = results.concat(batchResults);
+async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, maxOutputTokens = 2048) {
+    if (apiInstances.length === 0) {
+        throw new Error('No API keys provided for Gemini.');
+    }
 
-        if (i + batchSize < items.length) {
-            console.log(`[Batch] Waiting ${delay / 1000} seconds before next batch...`);
+    const genAI = apiInstances[apiKeyIndex];
+    apiKeyIndex = (apiKeyIndex + 1) % apiInstances.length;
+
+    const generativeModel = genAI.getGenerativeModel({ model });
+    const result = await generativeModel.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+}
+
+const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);
+async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed') {
+    let lastError = null;
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await fn();
+        } catch (error) {
+            lastError = error;
+            genericLogger.warn(`Attempt ${i + 1} failed with error: ${error.message}. Retrying in ${delay / 1000}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    return results;
+    const finalError = new Error(`${finalErr}: ${lastError ? lastError.message : 'Unknown error'}`);
+    finalError.originalError = lastError;
+    throw finalError;
 }
 
-module.exports = { retry, callGemini, processInBatches };
+module.exports = { getApiKeyCount, callGemini, retry, Logger, EMOJIS };

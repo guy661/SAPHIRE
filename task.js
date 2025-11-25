@@ -1,305 +1,228 @@
-require('dotenv').config();
-const fetch = require('node-fetch');
-const { JSDOM } = require('jsdom');
-const { Readability } = require('@mozilla/readability');
-const { retry, callGemini } = require('./utils.js');
+const { retry, callGemini, Logger, EMOJIS } = require('./utils.js');
 
+const taskLogger = new Logger('Task', 'yellow', EMOJIS.task);
 
-// =================================================================
-// SECTION: Task Definitions
-// =================================================================
+const interrogateTopicTask = async ({ data: { userTopic, language = 'de' } }) => {
+    taskLogger.info(`Starting topic interrogation for: "${userTopic.main_topic}"`);
 
-async function _tryToDismissModals(page, logs, maxAttempts = 3) {
-    logs.push(`[Dismiss Modals] Starting modal dismissal attempts.`);
+    const interrogatePrompts = {
+        'de': (topic) => `
+            Du bist ein hilfsbereiter, brillanter Forschungsassistent. Deine Aufgabe ist es, die Absicht eines Nutzers zu verstehen und ihm zu helfen, sein Forschungsthema zu präzisieren, um die bestmöglichen Ergebnisse zu erzielen.
+
+            **ANALYSIERE DAS FOLGENDE THEMA:**
+            - **Hauptthema:** "${topic.main_topic}"
+            - **Einschluss-Keywords:** "${topic.include_keywords || 'Keine'}"
+            - **Ausschluss-Keywords:** "${topic.exclude_keywords || 'Keine'}"
+
+            **DEINE AUFGABE (folge diesen Schritten):**
+
+            1.  **BEWERTE DIE SPEZIFITÄT:** Ist das Hauptthema zu breit oder vage für eine präzise Artikelsuche?
+                -   Themen wie "KI", "Gesundheit", "Unfall", "Wissenschaft" sind zu breit.
+                -   Themen wie "Anwendung von neuronalen Netzen in der medizinischen Diagnostik" sind gut.
+
+            2.  **FORMULIERE DEINE ANTWORT (wähle EINE der beiden Optionen):**
+
+                **OPTION A: Wenn das Thema GUT und SPEZIFISCH ist:**
+                -   Antworte mit einem JSON-Objekt, das anzeigt, dass keine Klärung erforderlich ist.
+
+                **OPTION B: Wenn das Thema BREIT oder VAGE ist:**
+                -   Formuliere eine freundliche, hilfreiche Frage, die dem Nutzer das Gefühl gibt, dass du ihm hilfst, nicht dass er einen Fehler gemacht hat.
+                -   Generiere 2 bis 3 **konkrete, spezifischere Themenvorschläge**, die mögliche Unterbereiche des ursprünglichen Themas darstellen. Die Vorschläge sollten als vollständige, eigenständige Themen formuliert sein.
+                -   **Beispiel 1:** Wenn das Thema "Unfall" ist, schlage vor: "Analyse von Verkehrsunfällen mit Fahrerflucht" oder "Prävention von Arbeitsunfällen in der Baubranche".
+                -   **Beispiel 2:** Wenn das Thema "KI" ist, frage: "Das ist ein weites Feld! Interessieren Sie sich mehr für die ethischen Implikationen von KI, für die Anwendung in der Robotik oder für die neuesten Durchbrüche bei Sprachmodellen?" und biete entsprechende Vorschläge an.
+
+            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
+            -   Kein einleitender Text, kein Markdown, nur das JSON.
+            -   **Format für Option A (gutes Thema):**
+                \`{ "needsClarification": false, "question": null, "suggestions": [] }\`
+            -   **Format für Option B (breites Thema):**
+                \`{ "needsClarification": true, "question": "<Deine generierte, hilfreiche Frage>", "suggestions": ["<Vorschlag 1>", "<Vorschlag 2>", "<Vorschlag 3>"] }\`
+        `,
+        'en': (topic) => `
+            You are a helpful, brilliant research assistant. Your job is to understand a user's intent and help them specify their research topic to get the best possible results.
+
+            **ANALYZE THE FOLLOWING TOPIC:**
+            - **Main Topic:** "${topic.main_topic}"
+            - **Include Keywords:** "${topic.include_keywords || 'None'}"
+            - **Exclude Keywords:** "${topic.exclude_keywords || 'None'}"
+
+            **YOUR TASK (follow these steps):**
+
+            1.  **EVALUATE SPECIFICITY:** Is the main topic too broad or vague for a precise article search?
+                -   Topics like "AI", "Health", "Accident", "Science" are too broad.
+                -   Topics like "Application of neural networks in medical diagnostics" are good.
+
+            2.  **FORMULATE YOUR RESPONSE (choose ONE of the two options):**
+
+                **OPTION A: If the topic is GOOD and SPECIFIC:**
+                -   Respond with a JSON object indicating no clarification is needed.
+
+                **OPTION B: If the topic is BROAD or VAGUE:**
+                -   Formulate a friendly, helpful question that makes the user feel you're helping, not that they made a mistake.
+                -   Generate 2 to 3 **concrete, more specific topic suggestions** that represent possible sub-areas of the original topic. The suggestions should be phrased as complete, standalone topics.
+                -   **Example 1:** If the topic is "Accident", suggest: "Analysis of traffic accidents involving hit-and-run" or "Prevention of work accidents in the construction industry".
+                -   **Example 2:** If the topic is "AI", ask: "That's a broad field! Are you more interested in the ethical implications of AI, its application in robotics, or the latest breakthroughs in language models?" and provide corresponding suggestions.
+
+            **RESPOND ONLY WITH A VALID JSON OBJECT:**
+            -   No introductory text, no markdown, just the JSON.
+            -   **Format for Option A (good topic):**
+                \`{ "needsClarification": false, "question": null, "suggestions": [] }\`
+            -   **Format for Option B (broad topic):**
+                \`{ "needsClarification": true, "question": "<Your generated, helpful question>", "suggestions": ["<Suggestion 1>", "<Suggestion 2>", "<Suggestion 3>"] }\`
+        `
+    };
     
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        logs.push(`[Dismiss Modals] Attempt #${attempt}...`);
-        let clickedSomethingInThisAttempt = false;
-
-        const allFrames = page.frames();
-        for (const frame of allFrames) {
-            if (frame.isDetached()) continue;
-            const frameIdentifier = `frame (${frame.url()})`;
-
-            const clickedInFrame = await frame.evaluate(async () => {
-                const positiveKeywords = ['accept', 'agree', 'confirm', 'continue', 'allow', 'ok', 'akzeptieren', 'zustimmen', 'fortfahren', 'einverstanden', 'continue reading'];
-                const isVisible = (elem) => !!(elem && (elem.offsetWidth || elem.offsetHeight || elem.getClientRects().length));
-
-                const buttons = Array.from(document.querySelectorAll('button, a, [role="button"]'));
-                let candidate = null;
-
-                for (const btn of buttons) {
-                    if (!isVisible(btn)) continue;
-
-                    const text = btn.innerText.toLowerCase().trim();
-                    if (!text) continue;
-
-                    if (positiveKeywords.some(kw => text.includes(kw))) {
-                        candidate = btn;
-                        break; 
-                    }
-                }
-
-                if (candidate) {
-                    candidate.click();
-                    return true;
-                }
-                return false;
-            });
-
-            if (clickedInFrame) {
-                logs.push(`[Dismiss Modals] Clicked a button in ${frameIdentifier}. Waiting for changes.`);
-                await page.waitForTimeout(2500); // Wait longer for things to settle
-                clickedSomethingInThisAttempt = true;
-                break; // Exit frame loop for this attempt, and restart scan from the top
-            }
-        }
-
-        if (!clickedSomethingInThisAttempt) {
-            logs.push(`[Dismiss Modals] No more modal buttons found in any frame. Finishing.`);
-            return; // No buttons found in any frame, we are done.
-        }
-    }
-    logs.push(`[Dismiss Modals] Finished max attempts.`);
-}
-
-async function _getArticleContent({ page, article, logs }) {
-    const link = article.link;
-    logs.push(`[getArticleContent] --------------------------------------------------`);
-    logs.push(`[getArticleContent] START: Processing ${link}`);
-
-    let articleText, finalUrl = link, title = article.title;
-
+    const getInterrogatePrompt = interrogatePrompts[language] || interrogatePrompts['de'];
+    const prompt = getInterrogatePrompt(userTopic);
 
     try {
-        logs.push(`[getArticleContent] Attempting Fast Path for ${link}`);
-        const controller = new AbortController();
-        const id = setTimeout(() => controller.abort(), 15000);
-        const response = await retry(() => fetch(link, {
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36' },
-            signal: controller.signal
-        }).finally(() => clearTimeout(id)));
-        
-        if (!response.ok) {
-            throw new Error(`Fast Path HTTP error! status: ${response.status}`);
-        }
-        
-        finalUrl = response.url;
-        logs.push(`[getArticleContent] Fast Path final URL: ${finalUrl}`);
-        const html = await response.text();
-        const doc = new JSDOM(html, { url: finalUrl });
-        const reader = new Readability(doc.window.document);
-        const readableArticle = reader.parse();
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
+        taskLogger.debug(`Raw AI interrogation response: ${responseString}`);
 
-        if (readableArticle && readableArticle.textContent) {
-            articleText = readableArticle.textContent;
-            title = readableArticle.title;
-            logs.push(`[getArticleContent] Fast Path extracted text length: ${articleText.length}`);
-            if (articleText.length < 100) {
-                 logs.push(`[getArticleContent] Fast Path content too short, falling back.`);
-                 throw new Error('Fast Path content too short.');
-            }
-            logs.push(`[getArticleContent] ✅ Fast Path SUCCEEDED for ${link}`);
-        } else {
-            throw new Error('Fast Path Readability parsing failed.');
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) {
+            throw new Error('No JSON object found in AI response for interrogation.');
         }
 
-    } catch (fastPathError) {
-        logs.push(`[getArticleContent] ⚠️ Fast Path FAILED for ${link}: ${fastPathError.message}`);
-        logs.push(`[getArticleContent] Attempting Slow Path (Puppeteer) for ${link}`);
-        
-        try {
-            logs.push(`[getArticleContent] Slow Path: Navigating to ${link}`);
-            await page.goto(link, {
-                waitUntil: 'domcontentloaded', // Do not wait for CSS/JS/images
-                timeout: 15000                 // 15s timeout
-            });
-            finalUrl = page.url();
-            logs.push(`[getArticleContent] Slow Path final URL: ${finalUrl}`);
+        const decision = JSON.parse(jsonMatch[0]);
+        taskLogger.info(`Parsed AI interrogation for "${userTopic.main_topic}": needsClarification = ${decision.needsClarification}`);
+        return decision;
 
-            await _tryToDismissModals(page, logs);
-
-            const isPaywalled = await page.evaluate(() => document.querySelector('[id*="paywall"], [class*="paywall"], [id*="meter"]'));
-            if (isPaywalled) {
-                logs.push(`[getArticleContent] ❌ Slow Path: Paywall detected.`);
-                throw new Error("Paywall detected.");
-            } else {
-                logs.push(`[getArticleContent] Slow Path: No paywall detected.`);
-            }
-
-            articleText = await page.evaluate(() => document.body.innerText);
-            title = await page.title();
-            
-            if (articleText) {
-                logs.push(`[getArticleContent] Slow Path extracted text length: ${articleText.length}`);
-            } else {
-                 logs.push(`[getArticleContent] ❌ Slow Path: Content extraction failed (articleText is empty).`);
-                 throw new Error("Slow Path content extraction failed.");
-            }
-            
-            logs.push(`[getArticleContent] ✅ Slow Path SUCCEEDED for ${link}`);
-
-        } catch (puppeteerError) {
-            logs.push(`[getArticleContent] ❌ Slow Path FAILED for ${link}: ${puppeteerError.message}`);
-            // Don't rethrow, just log the error and let the process continue.
-        }
-    }
-
-    if (!articleText || articleText.length < 100) {
-        logs.push(`[getArticleContent] ❌ FINAL CHECK FAILED: Not enough content found for ${link}. Length: ${articleText?.length || 0}`);
-        throw new Error(`Not enough content found for ${link} after all attempts.`);
-    }
-
-    logs.push(`[getArticleContent] END: Successfully processed ${link}. Final length: ${articleText.length}`);
-    logs.push(`[getArticleContent] --------------------------------------------------`);
-    return { articleText, finalUrl, title };
-}
-
-const getContentTask = async ({ page, data: { article } }) => {
-    const logs = [];
-    logs.push(`[getContentTask] >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>`);
-    logs.push(`[getContentTask] Task START for original URL: ${article.link}`);
-    try {
-        await page.goto(article.link, { waitUntil: 'networkidle2', timeout: 30000 });
-
-        // It's possible a consent screen appeared.
-        const onConsentPage = page.url().includes('consent.google.com');
-        if (onConsentPage) {
-            logs.push(`[getContentTask] Consent page detected. Attempting to click consent button.`);
-            const [response] = await Promise.all([
-                page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-                page.evaluate(() => {
-                    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-                    const acceptButton = buttons.find(btn => /(alle akzeptieren|accept all|i agree|zustimmen)/i.test(btn.innerText));
-                    if (acceptButton) {
-                        acceptButton.click();
-                        return true;
-                    }
-                    return false;
-                })
-            ]);
-            if (response) {
-                logs.push(`[getContentTask] Clicked consent button and awaited navigation.`);
-            } else {
-                logs.push(`[getContentTask] Could not find or click consent button.`);
-            }
-        }
-
-        if (page.url().includes('google.com')) {
-            try {
-                logs.push(`[getContentTask] Waiting for redirect from Google... Current URL: ${page.url()}`);
-                await page.waitForFunction(
-                    () => !window.location.hostname.endsWith('google.com'),
-                    { timeout: 15000 }
-                );
-                logs.push(`[getContentTask] Redirected. New URL: ${page.url()}`);
-            } catch (e) {
-                logs.push(`[getContentTask] ⚠️ Timed out waiting for redirect from Google. Continuing with current URL: ${page.url()}`);
-            }
-        }
-        
-        const realUrl = page.url();
-        logs.push(`[getContentTask] Real URL is: ${realUrl}`);
-        article.link = realUrl;
-
-        const { articleText, finalUrl, title } = await _getArticleContent({ page, article, logs });
-        const result = { ...article, title, articleText, link: finalUrl, logs };
-        logs.push(`[getContentTask] Task END for ${article.link}. Success.`);
-        logs.push(`[getContentTask] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
-        console.log(logs.join('\n'));
-        return result;
     } catch (error) {
-        logs.push(`[getContentTask] ⚠️ Task FAILED for ${article.link}: ${error.message}`);
-        logs.push(`[getContentTask] <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<`);
-        console.log(logs.join('\n'));
-        return { ...article, error: error.message, logs };
+        taskLogger.error(`Error during topic interrogation for "${userTopic.main_topic}"`, error);
+        // Fallback to a safe response if the AI fails
+        return { needsClarification: false, question: null, suggestions: [] };
     }
 };
 
-const summarizeArticleTask = async ({ data: { article, length = 'default' } }) => {
-    console.log(`[Task] Starting summary for: ${article.link}`);
+const summarizeArticleTask = async ({ data: { article, style = 'paragraph', language = 'de' } }) => {
+    taskLogger.info(`Starting summary for: ${article.link} (Style: ${style}, Lang: ${language})`);
+    
+    if (!article.content || typeof article.content !== 'string') {
+        const error = new Error('Article content is missing or invalid.');
+        taskLogger.error(`Article content is missing or not a string for article ${article.link}.`, error);
+        throw error;
+    }
+
+    const summarizePrompts = {
+        'de': {
+            'paragraph': `Du bist ein erfahrener Redakteur. Fasse den folgenden Artikel prägnant in **zwei bis drei Sätzen** zusammen. Konzentriere dich auf die Kernaussage und die wichtigsten Schlussfolgerungen. Antworte nur mit der Zusammenfassung, ohne einleitende Floskeln.`,
+            'bullets': `Du bist ein Analyst, der Informationen für ein schnelles Briefing aufbereitet. Extrahiere die **drei bis fünf wichtigsten Kernaussagen** aus dem folgenden Artikel und präsentiere sie als Stichpunkte (mit '-' am Anfang jeder Zeile). Antworte nur mit den Stichpunkten.`
+        },
+        'en': {
+            'paragraph': `You are an expert editor. Concisely summarize the following article in **two to three sentences**. Focus on the core message and key conclusions. Respond only with the summary, without any introductory phrases.`,
+            'bullets': `You are an analyst preparing information for a rapid briefing. Extract the **three to five most important key points** from the following article and present them as bullet points (using '-' at the start of each line). Respond only with the bullet points.`
+        }
+    };
+
+    const langPrompts = summarizePrompts[language] || summarizePrompts['de'];
+    const promptTemplate = langPrompts[style] || langPrompts['paragraph'];
+    
+    const fullPrompt = `${promptTemplate}\n\nARTIKELTEXT:\n"""\n${article.content.substring(0, 8000)}\n"""`;
+
     try {
-        const lengthOptions = {
-            'short': 'einem kurzen Satz',
-            'default': 'zwei Sätzen',
-            'long': 'drei ausführlichen Sätzen'
-        };
-
-        const prompt = `Fasse den folgenden Artikeltext in ${lengthOptions[length] || lengthOptions['default']} zusammen. Antworte nur mit der Zusammenfassung, ohne einleitende Sätze wie "Hier ist die Zusammenfassung:":\n\n"${article.articleText}"`;
-        
-        const summary = await callGemini(prompt);
-
-        console.log(`[Task] Successfully summarized: ${article.link}`);
+        const summary = await callGemini(fullPrompt, 'gemini-2.5-flash', 0.2);
+        taskLogger.info(`Successfully summarized: ${article.link}`);
         return { ...article, summary };
     } catch (error) {
-        console.error(`[Task] Error summarizing article ${article.link}:`, error);
-        // Re-throw the error so Promise.allSettled in the route can catch it
+        taskLogger.error(`Error summarizing article ${article.link}`, error);
         throw new Error(`Failed to summarize article: ${error.message}`);
     }
 };
 
-const semanticCheckTask = async ({ data: { article, userTopic } }) => {
-    console.log(`[Task] Starting semantic check for: ${article.link}`);
-    const logs = [];
-    try {
-        const prompt = `
-            You are a highly discerning and specialized research assistant, an expert in "${userTopic.main_topic}". Your primary mission is to protect a busy professional from irrelevant articles. You must be extremely strict and prioritize precision over recall.
+const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' } }) => {
+    taskLogger.info(`Starting semantic check for: ${article.link} (Lang: ${language})`);
 
-            The user's specific research focus is:
-            - Core Subject: "${userTopic.main_topic}"
-            - Desired Concepts (Must be the main focus): "${userTopic.include_keywords || 'Any'}"
-            - Forbidden Topics (Must be completely absent): "${userTopic.exclude_keywords || 'None'}"
+    if (!article.content || typeof article.content !== 'string') {
+        const error = new Error('Article content is missing or invalid.');
+        taskLogger.error(`Article content is missing or not a string for article ${article.link}.`, error);
+        throw error;
+    }
+    
+    const semanticCheckPrompts = {
+        'de': (userTopic, articleText, title) => `
+            Du bist ein anspruchsvoller, intelligenter Gatekeeper für Content. Deine Aufgabe ist es, die wahre Absicht eines Nutzers zu verstehen und zu schützen. Lehne alles ab, was nicht eine direkte und zufriedenstellende Antwort auf das ist, was der Nutzer WIRKLICH wissen wollte. Sei extrem wählerisch.
 
-            Article Snippet (first ~8000 characters):
-            ---
-            ${article.articleText.substring(0, 8000)}
-            ---
+            **SCHLÜSSELELEMENTE DER ANALYSE:**
 
-            **Your Strict Filtering Protocol (Must be followed precisely):**
+            1.  **Verstehe die Nutzerintention:**
+                -   **Hauptthema:** "${userTopic.main_topic}"
+                -   Stell dir vor, du bist der Nutzer. Was ist die **Frage hinter der Suchanfrage**? Sucht der Nutzer nach einer Einführung, einer tiefen technischen Analyse, einer Nachrichtenmeldung, einer Meinung?
+                -   Versetz dich in die Lage des Nutzers, der nach diesem Thema sucht. Wäre dieser Artikel ein Volltreffer, der die Suche beendet, oder nur ein "vielleicht interessant"? Nur Volltreffer sind relevant.
 
-            1.  **Interpret the User's Intent:** The "Desired Concepts" are not just keywords; they represent conceptual themes.
-                - For example, if a concept is "New Models", you are looking for articles whose central theme is the announcement, analysis, or architecture of new AI models (e.g., GPT-5, Claude 4, etc.). An article that only mentions a new model in passing while discussing a different topic (like AI ethics or market trends) is **irrelevant**.
-                - If a concept is "Image Generation", the article must be *about* the techniques, models, or impact of generating images with AI. An article on a different topic that happens to feature an AI-generated image is **irrelevant**.
+            2.  **Bewerte den Artikelinhalt KRITISCH:**
+                -   **Titel:** "${title}"
+                -   **Text-Ausschnitt:** "${articleText.substring(0, 3000)}..."
 
-            2.  **Primary Filter: Desired Concepts.**
-                - If "Desired Concepts" are specified, the article's **main, central theme** MUST be a deep and substantive exploration of at least one of these concepts. A brief or tangential mention is an immediate disqualification.
-                - If the article is only related to the "Core Subject" but does not focus on the "Desired Concepts", it is **irrelevant**.
+            3.  **SYNTHESE & ENTSCHEIDUNG (folge diesen Schritten):**
 
-            3.  **Secondary Filter: Forbidden Topics.**
-                - The article must not contain any substantive discussion of the "Forbidden Topics". Even a few paragraphs can be enough to disqualify it.
-
-            4.  **Final Judgment:** You must be conservative. If you have any doubt about whether the article is a perfect fit for the user's highly specific focus, you MUST classify it as not relevant. It is better to miss a borderline article than to include an irrelevant one.
-
-            5.  **Deliver Your Verdict:** Respond **only** with a single, valid JSON object. Do not add any other text, explanations, or markdown formatting.
-                - The JSON object must have two keys:
-                  - \`"is_relevant"\`: \`true\` or \`false\`.
-                  - \`"reason"\`: A concise, one-sentence explanation for your decision based on the protocol above. Start your reason with "Relevant because..." or "Irrelevant because...".
+                a. **Ist das Thema des Artikels wirklich das Hauptthema des Nutzers?** Eine bloße Erwähnung von Keywords reicht nicht. Der *Kernfokus* des Artikels muss mit der *Nutzerintention* übereinstimmen.
                 
-                Example Response:
-                {"is_relevant": false, "reason": "Irrelevant because the article's main focus is AI ethics and only briefly mentions a new model, which does not meet the user's requirement for a deep dive into 'New Models'."}
-        `;
-        logs.push(`[Semantic Check] Prompt created for ${article.link}.`);
+                b. **Keyword-Abgleich (im Kontext der Intention):**
+                   - **Muss enthalten:** "${userTopic.include_keywords || 'Keine'}". Werden diese Konzepte *zentral* und im Sinne der Nutzerintention diskutiert, oder nur am Rande erwähnt? Eine beiläufige Nennung ist wertlos.
+                   - **Muss ausschließen:** "${userTopic.exclude_keywords || 'Keine'}". Das Finden eines dieser Wörter führt zur **sofortigen Irrelevanz**, es sei denn, der Kontext ist eindeutig nicht-exklusiv (z.B. "Unternehmen X, nicht zu verwechseln mit Y").
 
-        const decisionString = await retry(() => callGemini(prompt));
-        logs.push(`[Semantic Check] Raw AI response received for ${article.link}.`);
+                c. **FINALES URTEIL:** Würdest du als Nutzer, nachdem du diesen Artikel gelesen hast, deine Suche als erfolgreich betrachten und beenden? Oder würdest du weiter nach besseren Ergebnissen suchen?
+
+            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
+            - Kein einleitender Text, kein Markdown, nur das JSON.
+            - Format: \`{ "is_relevant": <boolean>, "reason": "<Deine prägnante Begründung, warum der Artikel aus Nutzersicht ein Volltreffer ist oder eben nicht.>" }\`
+        `,
+        'en': (userTopic, articleText, title) => `
+            You are a sophisticated, intelligent content gatekeeper. Your mission is to understand and protect a user's true intent. Reject anything that isn't a direct and satisfying answer to what the user REALLY wanted to know. Be extremely selective.
+
+            **KEY ELEMENTS FOR ANALYSIS:**
+
+            1.  **Understand User Intent:**
+                -   **Main Topic:** "${userTopic.main_topic}"
+                -   Imagine you are the user. What is the **underlying question** behind this search query? Is the user looking for an introduction, a deep technical analysis, a news update, an opinion piece?
+                -   Put yourself in the user's shoes. Would this article be a "bullseye" hit that ends their search, or just a "maybe interesting" tangent? Only bullseye hits are relevant.
+
+            2.  **Critically Evaluate Article Content:**
+                -   **Title:** "${title}"
+                -   **Article Snippet:** "${articleText.substring(0, 3000)}..."
+
+            3.  **SYNTHESIS & DECISION (follow these steps):**
+
+                a. **Is the article's topic truly the user's main topic?** A mere mention of keywords is not enough. The *core focus* of the article must align with the *user's intent*.
+
+                b. **Keyword Alignment (in the context of intent):**
+                   - **Must Include:** "${userTopic.include_keywords || 'None'}". Are these concepts discussed *centrally* and in line with the user's intent, or just mentioned in passing? A casual mention is worthless.
+                   - **Must Exclude:** "${userTopic.exclude_keywords || 'None'}". Finding one of these words means **immediate irrelevance**, unless the context is clearly non-exclusive (e.g., "Company X, not to be confused with Y").
+
+                c. **FINAL JUDGMENT:** As the user, after reading this article, would you consider your search successful and complete? Or would you continue looking for better results?
+
+            **RESPOND ONLY WITH A VALID JSON OBJECT:**
+            - No introductory text, no markdown, just the JSON.
+            - Format: \`{ "is_relevant": <boolean>, "reason": "<Your concise reasoning explaining why the article is or is not a bullseye hit from the user's perspective.>" }\`
+        `
+    };
+
+    const getSemanticPrompt = semanticCheckPrompts[language] || semanticCheckPrompts['de'];
+    const prompt = getSemanticPrompt(userTopic, article.content, article.title);
+    
+    taskLogger.info(`Prompt created for ${article.link}.`);
+
+    try {
+        const decisionString = await retry(() => callGemini(prompt, 'gemini-2.5-flash', 0.0));
+        taskLogger.debug(`Raw AI response received: ${decisionString}`);
         
         const jsonMatch = decisionString.match(/\{.*\}/s);
         if (!jsonMatch) {
-            throw new Error(`No JSON object found in AI response. Raw response: ${decisionString}`);
+            throw new Error(`No JSON object found in AI response.`);
         }
 
         const decision = JSON.parse(jsonMatch[0]);
-        logs.push(`[Semantic Check] Parsed AI decision for ${article.link}: ${decision.is_relevant}.`);
+        taskLogger.debug(`Extracted JSON string: ${jsonMatch[0]}`);
+        taskLogger.info(`Parsed AI decision for ${article.link}: ${decision.is_relevant}.`);
         
-        return { ...article, is_relevant: decision.is_relevant, reason: decision.reason, logs };
+        return { ...article, is_relevant: decision.is_relevant, reason: decision.reason };
 
     } catch (error) {
-        logs.push(`[Semantic Check] ⚠️ Error during semantic check for ${article.link}: ${error.message}`);
-        console.error(logs.join('\n'));
-        // Re-throw the error to be caught by the calling cluster task
-        throw error;
+        taskLogger.error(`Error during semantic check for ${article.link}`, error);
+        throw new Error(`Failed to perform semantic check: ${error.message}`);
     }
 };
 
 
-module.exports = { getContentTask, _getArticleContent, summarizeArticleTask, semanticCheckTask };
+module.exports = { summarizeArticleTask, semanticCheckTask, interrogateTopicTask };
