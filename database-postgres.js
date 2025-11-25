@@ -197,8 +197,27 @@ async function clearDatabase() {
     }
 }
 
-init().catch(err => {
-    dbLogger.error("Failed to init database on startup", err);
+async function runMigrations() {
+    const client = await pool.connect();
+    try {
+        await client.query(`
+            ALTER TABLE topics ADD COLUMN specification TEXT;
+        `);
+        dbLogger.info('Migration successful: added "specification" column to "topics" table.');
+    } catch (error) {
+        if (error.code !== '42701') { // 42701 is 'duplicate_column'
+            dbLogger.error('Error running migrations:', error);
+            throw error;
+        } else {
+            dbLogger.info('Migration unnecessary: "specification" column already exists.');
+        }
+    } finally {
+        client.release();
+    }
+}
+
+init().then(runMigrations).catch(err => {
+    dbLogger.error("Failed to init or migrate database on startup", err);
 });
 
 module.exports = {
