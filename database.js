@@ -140,6 +140,15 @@ function init() {
                         } else {
                             console.log('Column "summary_length" added to "topics" or already exists.');
                         }
+                    });
+                    db.run("ALTER TABLE topics ADD COLUMN specification TEXT", (err) => {
+                        if (err) {
+                            if (!err.message.includes("duplicate column name")) {
+                                console.error('Error adding specification column to topics:', err.message);
+                            }
+                        } else {
+                            console.log('Column "specification" added to "topics" or already exists.');
+                        }
                         resolve();
                     });
                 });
@@ -323,19 +332,33 @@ function getTopicByUserId(userId) {
     });
 }
 
-function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords, summary_type, summary_length }) {
+function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords, summary_type, summary_length, specification }) {
     return new Promise((resolve, reject) => {
         const sql = `
-            INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords, summary_type, summary_length)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords, summary_type, summary_length, specification)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 main_topic = excluded.main_topic,
                 include_keywords = excluded.include_keywords,
                 exclude_keywords = excluded.exclude_keywords,
                 summary_type = excluded.summary_type,
-                summary_length = excluded.summary_length;
+                summary_length = excluded.summary_length,
+                specification = excluded.specification;
         `;
-        db.run(sql, [userId, main_topic, include_keywords, exclude_keywords, summary_type, summary_length], function(err) {
+        db.run(sql, [userId, main_topic, include_keywords, exclude_keywords, summary_type, summary_length, specification], function(err) {
+            if (err) {
+                reject(err);
+            } else {
+                resolve({ changes: this.changes });
+            }
+        });
+    });
+}
+
+function updateTopicSpecification(userId, specification) {
+    return new Promise((resolve, reject) => {
+        const sql = `UPDATE topics SET specification = ? WHERE user_id = ?`;
+        db.run(sql, [specification, userId], function(err) {
             if (err) {
                 reject(err);
             } else {
@@ -421,6 +444,7 @@ module.exports = {
     getUserByUsername,
     getTopicByUserId,
     upsertTopic,
+    updateTopicSpecification,
     clearDatabase,
     createJobArticle,
     getJobArticle,

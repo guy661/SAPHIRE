@@ -6,51 +6,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Personalisierung - Saphire</title>
     <link rel="stylesheet" href="style.css">
-    <style>
-        #ai-feedback-container {
-            margin-top: -0.75rem;
-            margin-bottom: 1rem;
-            padding: 1rem 1.25rem;
-            border: 1px solid var(--saphir-green);
-            background: color-mix(in srgb, var(--saphir-green) 10%, transparent);
-            border-radius: 0 0 var(--radius-md) var(--radius-md);
-            transform-origin: top center;
-            transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-            opacity: 0; transform: scaleY(0.9);
-            max-height: 0; overflow: hidden;
-        }
-        #ai-feedback-container.visible {
-            opacity: 1; transform: scaleY(1);
-            max-height: 500px; /* Allow space to grow */
-            border-top: none;
-        }
-        #ai-feedback-text {
-            display: flex; align-items: center; gap: 0.75rem;
-            margin-bottom: 0.75rem;
-        }
-        #ai-feedback-text::before {
-            content: '💡'; font-size: 1.5rem;
-        }
-        #ai-suggestion-buttons {
-            display: flex; flex-wrap: wrap; gap: 0.5rem;
-            margin-top: 0.5rem;
-        }
-        .suggestion-btn {
-            padding: 0.4rem 0.8rem;
-            font-size: 0.85rem;
-            font-weight: 500;
-            background-color: color-mix(in srgb, var(--saphir-blue) 30%, transparent);
-            border: 1px solid var(--saphir-blue);
-            color: var(--color-text-primary);
-            border-radius: var(--radius-sm);
-            cursor: pointer;
-            transition: all 0.2s ease;
-        }
-        .suggestion-btn:hover {
-            background-color: var(--saphir-blue);
-            transform: translateY(-2px);
-        }
-    </style>
 </head>
 <body>
     <div class="container">
@@ -70,11 +25,6 @@
                     <label for="main-topic">Hauptthema</label>
                     <input type="text" id="main-topic" name="main_topic" required placeholder="z.B. 'Künstliche Intelligenz in der Medizin'">
                 </div>
-                 <!-- AI Feedback Box -->
-                <div id="ai-feedback-container">
-                    <p id="ai-feedback-text"></p>
-                    <div id="ai-suggestion-buttons"></div>
-                </div>
                 <div class="form-group">
                     <label for="include-keywords">Unterthemen, die sie besonders interessieren (muss enthalten sein, mit Komma trennen)</label>
                     <input type="text" id="include-keywords" name="include_keywords" placeholder="z.B. 'Diagnostik, Bildgebung'">
@@ -89,36 +39,20 @@
         </div>
     </div>
 
-    <div id="ai-clarification-modal" class="modal-overlay" style="display: none;">
-        <div class="modal-content">
-            <h3 id="modal-question"></h3>
-            <p>Ihre Eingabe hilft der KI, die Suche für Sie zu verfeinern.</p>
-            <form id="clarification-form">
-                <div class="form-group">
-                    <input type="text" id="clarification-input" class="form-control" placeholder="Ihre Antwort...">
-                </div>
-                <button type="submit" class="btn">Thema Spezifizieren</button>
-            </form>
-        </div>
-    </div>
-
     <script>
         document.addEventListener('DOMContentLoaded', async () => {
             const topicForm = document.getElementById('topic-form');
             const mainTopicInput = document.getElementById('main-topic');
             const includeKeywordsInput = document.getElementById('include-keywords');
             const excludeKeywordsInput = document.getElementById('exclude-keywords');
-            
-            const modal = document.getElementById('ai-clarification-modal');
-            const modalQuestion = document.getElementById('modal-question');
-            const clarificationForm = document.getElementById('clarification-form');
-            const clarificationInput = document.getElementById('clarification-input');
+            let userId;
 
             // --- Initial Data Load ---
             try {
                 const [userRes, topicRes] = await Promise.all([ fetch('/api/user'), fetch('/api/topics') ]);
                 if (!userRes.ok) { window.location.href = '/'; return; }
                 const user = await userRes.json();
+                userId = user.userId;
                 document.getElementById('welcome-message').textContent = `Personalisierung für ${user.username}`;
 
                 if (topicRes.ok) {
@@ -152,9 +86,11 @@
                     const data = await res.json();
 
                     if (data.needsClarification) {
-                        modalQuestion.textContent = data.question;
-                        clarificationInput.value = mainTopicInput.value;
-                        modal.style.display = 'flex';
+                        const query = new URLSearchParams({
+                            question: data.question,
+                            userId: userId
+                        }).toString();
+                        window.location.href = `/ai-clarification.html?${query}`;
                     } else {
                         displayMessage('Dieses Thema ist spezifisch genug für eine gute Suche!', 'success');
                     }
@@ -165,13 +101,6 @@
                 }
             };
             
-            clarificationForm.addEventListener('submit', (e) => {
-                e.preventDefault();
-                mainTopicInput.value = clarificationInput.value;
-                modal.style.display = 'none';
-                topicForm.dispatchEvent(new Event('submit', { cancelable: true }));
-            });
-
             // --- Form Submission Handler ---
             topicForm.addEventListener('submit', async (e) => {
                 e.preventDefault();

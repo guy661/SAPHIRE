@@ -247,6 +247,23 @@ async function main() {
             res.status(500).json({ error: 'Failed to save topic' });
         }
     });
+
+    app.post('/api/clarify-topic', isAuthenticated, async (req, res) => {
+        const { userId, specification } = req.body;
+        if (!userId || !specification) {
+            return res.status(400).json({ error: 'User ID and specification are required' });
+        }
+        if (userId !== req.session.userId) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        try {
+            await db.updateTopicSpecification(userId, specification);
+            res.status(200).json({ message: 'Specification saved successfully' });
+        } catch (error) {
+            serverLogger.error('Error saving specification:', error);
+            res.status(500).json({ error: 'Failed to save specification' });
+        }
+    });
     
     // PAGE SERVING & STATIC FILES
     app.get('/', (req, res) => {
@@ -257,6 +274,11 @@ async function main() {
     app.get('/personalization', (req, res) => {
         res.set('Cache-control', 'no-store');
         res.sendFile(path.join(__dirname, 'public', 'personalization.html'));
+    });
+
+    app.get('/ai-clarification', (req, res) => {
+        res.set('Cache-control', 'no-store');
+        res.sendFile(path.join(__dirname, 'public', 'ai-clarification.html'));
     });
     
     app.use(express.static(path.join(__dirname, 'public')));

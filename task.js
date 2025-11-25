@@ -147,6 +147,7 @@ const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' }
 
             1.  **Verstehe die Nutzerintention:**
                 -   **Hauptthema:** "${userTopic.main_topic}"
+                -   **Spezifizierung:** "${userTopic.specification || 'Keine'}"
                 -   Stell dir vor, du bist der Nutzer. Was ist die **Frage hinter der Suchanfrage**? Sucht der Nutzer nach einer Einführung, einer tiefen technischen Analyse, einer Nachrichtenmeldung, einer Meinung?
                 -   Versetz dich in die Lage des Nutzers, der nach diesem Thema sucht. Wäre dieser Artikel ein Volltreffer, der die Suche beendet, oder nur ein "vielleicht interessant"? Nur Volltreffer sind relevant.
 
@@ -156,7 +157,7 @@ const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' }
 
             3.  **SYNTHESE & ENTSCHEIDUNG (folge diesen Schritten):**
 
-                a. **Ist das Thema des Artikels wirklich das Hauptthema des Nutzers?** Eine bloße Erwähnung von Keywords reicht nicht. Der *Kernfokus* des Artikels muss mit der *Nutzerintention* übereinstimmen.
+                a. **Ist das Thema des Artikels wirklich das Hauptthema des Nutzers?** Eine bloße Erwähnung von Keywords reicht nicht. Der *Kernfokus* des Artikels muss mit der *Nutzerintention* übereinstimmen. Die Spezifizierung ist hierbei ein entscheidender Hinweis.
                 
                 b. **Keyword-Abgleich (im Kontext der Intention):**
                    - **Muss enthalten:** "${userTopic.include_keywords || 'Keine'}". Werden diese Konzepte *zentral* und im Sinne der Nutzerintention diskutiert, oder nur am Rande erwähnt? Eine beiläufige Nennung ist wertlos.
@@ -175,6 +176,7 @@ const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' }
 
             1.  **Understand User Intent:**
                 -   **Main Topic:** "${userTopic.main_topic}"
+                -   **Specification:** "${userTopic.specification || 'None'}"
                 -   Imagine you are the user. What is the **underlying question** behind this search query? Is the user looking for an introduction, a deep technical analysis, a news update, an opinion piece?
                 -   Put yourself in the user's shoes. Would this article be a "bullseye" hit that ends their search, or just a "maybe interesting" tangent? Only bullseye hits are relevant.
 
@@ -184,7 +186,7 @@ const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' }
 
             3.  **SYNTHESIS & DECISION (follow these steps):**
 
-                a. **Is the article's topic truly the user's main topic?** A mere mention of keywords is not enough. The *core focus* of the article must align with the *user's intent*.
+                a. **Is the article's topic truly the user's main topic?** A mere mention of keywords is not enough. The *core focus* of the article must align with the *user's intent*. The specification is a critical clue here.
 
                 b. **Keyword Alignment (in the context of intent):**
                    - **Must Include:** "${userTopic.include_keywords || 'None'}". Are these concepts discussed *centrally* and in line with the user's intent, or just mentioned in passing? A casual mention is worthless.

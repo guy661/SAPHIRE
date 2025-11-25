@@ -26,6 +26,7 @@ async function init() {
                 main_topic TEXT NOT NULL,
                 include_keywords TEXT,
                 exclude_keywords TEXT,
+                specification TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
@@ -96,16 +97,24 @@ async function getTopicByUserId(userId) {
     return res.rows[0];
 }
 
-async function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords }) {
+async function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords, specification }) {
     await pool.query(
-        `INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords, specification)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (user_id) DO UPDATE SET
          main_topic = EXCLUDED.main_topic,
          include_keywords = EXCLUDED.include_keywords,
          exclude_keywords = EXCLUDED.exclude_keywords,
+         specification = EXCLUDED.specification,
          updated_at = CURRENT_TIMESTAMP`,
-        [userId, main_topic, include_keywords, exclude_keywords]
+        [userId, main_topic, include_keywords, exclude_keywords, specification]
+    );
+}
+
+async function updateTopicSpecification(userId, specification) {
+    await pool.query(
+        'UPDATE topics SET specification = $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
+        [specification, userId]
     );
 }
 
@@ -200,6 +209,7 @@ module.exports = {
     updateUserLanguage,
     getTopicByUserId,
     upsertTopic,
+    updateTopicSpecification,
     createJob,
     getJob,
     createJobArticle,
