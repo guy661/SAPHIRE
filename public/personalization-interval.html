@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Intervall & Stil - Synapse Summarizer</title>
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="/style.css">
+    <style>
+        .radio-group { display: flex; flex-direction: column; gap: 0.75rem; }
+        .radio-label {
+            display: block;
+            padding: 1rem;
+            background-color: rgba(10, 20, 30, 0.7);
+            border: 1px solid var(--color-border);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            transition: all var(--transition-fast);
+        }
+        .radio-label:hover { border-color: var(--saphir-blue); }
+        .radio-label input { margin-right: 0.75rem; }
+        .radio-label.selected {
+             border-color: var(--saphir-green);
+             box-shadow: 0 0 0 2px color-mix(in srgb, var(--saphir-green) 20%, transparent);
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container" style="max-width: 600px; margin-top: 5rem;">
+        <div id="personalization-content" style="padding: 2.5rem;">
+            <h1 style="font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem;">Intervall & Stil</h1>
+            <p style="color: var(--color-text-secondary); margin-bottom: 2rem;">
+                Stellen Sie ein, wie oft und in welchem Format Sie Ihre Zusammenfassungen erhalten möchten.
+            </p>
+
+            <form id="settingsForm">
+                <!-- Notification Interval Section -->
+                <h2 style="font-size: 1.1rem; font-weight: 500; color: var(--color-text-secondary); margin-top: 1.5rem; margin-bottom: 1rem; border-top: 1px solid var(--color-border); padding-top: 1.5rem;">Benachrichtigungsintervall</h2>
+                <div class="form-group" style="display: flex; flex-direction: row; gap: 1rem; align-items: flex-end;">
+                    <div style="flex-grow: 1;">
+                        <label for="interval_value" style="font-size: 0.875rem; color: var(--color-text-secondary); margin-bottom: 0.5rem; display: block;">Intervall</label>
+                        <input type="number" id="interval_value" class="form-control" min="1" value="1" required>
+                    </div>
+                    <div>
+                        <label for="interval_unit" style="font-size: 0.875rem; color: var(--color-text-secondary); margin-bottom: 0.5rem; display: block;">Zeiteinheit</label>
+                        <select id="interval_unit" class="form-control">
+                            <option value="minutes">Minuten</option>
+                            <option value="hours" selected>Stunden</option>
+                            <option value="days">Tage</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Summary Style Section -->
+                <h2 style="font-size: 1.1rem; font-weight: 500; color: var(--color-text-secondary); margin-top: 2rem; margin-bottom: 1rem; border-top: 1px solid var(--color-border); padding-top: 1.5rem;">Art der Zusammenfassung</h2>
+                <div class="form-group radio-group">
+                    <label class="radio-label" for="style-bullets">
+                        <input type="radio" id="style-bullets" name="summary_style" value="bullets" checked>
+                        Kurze Stichpunkte (Ideal für den schnellen Überblick)
+                    </label>
+                    <label class="radio-label" for="style-standard">
+                        <input type="radio" id="style-standard" name="summary_style" value="standard">
+                        Normal (ca. 100 Wörter pro Artikel)
+                    </label>
+                    <label class="radio-label" for="style-detailed">
+                        <input type="radio" id="style-detailed" name="summary_style" value="detailed">
+                        Ausführlich (ca. 300 Wörter pro Artikel)
+                    </label>
+                </div>
+
+                <div style="margin-top: 2.5rem;">
+                    <button type="submit" id="saveSettingsBtn" class="btn" style="width: 100%;">Speichern & Weiter zu den Quellen</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        // This is a temporary, simple authenticated fetch wrapper.
+        // In a real app, this would be in a shared utility file.
+        async function authenticatedFetch(url, options = {}) {
+            const defaultHeaders = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            };
+
+            const finalOptions = {
+                ...options,
+                headers: {
+                    ...defaultHeaders,
+                    ...options.headers,
+                },
+                credentials: 'include' // Important for sending session cookies
+            };
+
+            try {
+                const response = await fetch(url, finalOptions);
+                if (response.status === 401) {
+                    window.location.href = '/login.html'; // Redirect to login if not authenticated
+                    throw new Error('Not authenticated');
+                }
+                if (!response.ok) {
+                    const errorBody = await response.json().catch(() => ({ error: 'Request failed with status ' + response.status }));
+                    throw new Error(errorBody.error || 'An unknown error occurred');
+                }
+                if (response.status === 204) return; // No content, e.g., for DELETE
+                return await response.json();
+            } catch (error) {
+                console.error(`API call to ${url} failed:`, error.message);
+                throw error;
+            }
+        }
+
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const settingsForm = document.getElementById('settingsForm');
+            const intervalValueEl = document.getElementById('interval_value');
+            const intervalUnitEl = document.getElementById('interval_unit');
+            const radioLabels = document.querySelectorAll('.radio-label');
+            const saveBtn = document.getElementById('saveSettingsBtn');
+            const urlParams = new URLSearchParams(window.location.search);
+            const dashboardId = urlParams.get('dashboardId');
+
+            if (!dashboardId) {
+                alert('Fehler: Keine Dashboard-ID gefunden. Bitte starten Sie den Prozess erneut.');
+                window.location.href = '/';
+                return;
+            }
+
+            // Add visual selection indicator for radio buttons
+            radioLabels.forEach(label => {
+                const radio = label.querySelector('input');
+                if (radio.checked) {
+                    label.classList.add('selected');
+                }
+                radio.addEventListener('change', () => {
+                    radioLabels.forEach(otherLabel => otherLabel.classList.remove('selected'));
+                    if (radio.checked) {
+                        label.classList.add('selected');
+                    }
+                });
+            });
+
+
+            settingsForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                saveBtn.disabled = true;
+                saveBtn.textContent = 'Speichern...';
+
+                try {
+                    // Fetch the current dashboard to get its name
+                    const currentDashboard = await authenticatedFetch(`/api/dashboards/${dashboardId}`);
+                    const currentName = currentDashboard.name;
+
+                    const intervalValue = parseInt(intervalValueEl.value, 10);
+                    const intervalUnit = intervalUnitEl.value;
+                    let intervalMinutes = 0;
+                    
+                    if (intervalUnit === 'minutes') {
+                        intervalMinutes = intervalValue;
+                    } else if (intervalUnit === 'hours') {
+                        intervalMinutes = intervalValue * 60;
+                    } else if (intervalUnit === 'days') {
+                        intervalMinutes = intervalValue * 60 * 24;
+                    }
+
+                    const selectedStyle = document.querySelector('input[name="summary_style"]:checked');
+
+                    const settingsData = {
+                        name: currentName, // Pass the name along so it doesn't get erased
+                        interval_minutes: intervalMinutes,
+                        summary_style: selectedStyle ? selectedStyle.value : 'standard'
+                    };
+
+                    await authenticatedFetch(`/api/dashboards/${dashboardId}`, {
+                        method: 'PUT',
+                        body: JSON.stringify(settingsData),
+                    });
+
+                    // Redirect to the main page, which should now show the new/updated dashboard
+                    window.location.href = '/';
+
+                } catch (error) {
+                    alert(`Fehler beim Speichern der Einstellungen: ${error.message}`);
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = 'Speichern & Dashboard öffnen';
+                }
+            });
+        });
+    </script>
+</body>
+</html>

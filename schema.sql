@@ -6,18 +6,22 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE TABLE IF NOT EXISTS topics (
+CREATE TABLE IF NOT EXISTS dashboards (
     id SERIAL PRIMARY KEY,
-    user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
     user_intent TEXT,
+    interval_minutes INTEGER,
+    summary_style VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
     id TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    dashboard_id INTEGER NOT NULL REFERENCES dashboards(id) ON DELETE CASCADE,
     status VARCHAR(50) NOT NULL,
-    summary_style VARCHAR(50) DEFAULT 'paragraph',
+    meta_summary TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -28,7 +32,6 @@ CREATE TABLE IF NOT EXISTS articles (
     link TEXT NOT NULL,
     pub_date TIMESTAMP WITH TIME ZONE,
     content TEXT,
-    summary TEXT,
     is_relevant BOOLEAN,
     relevance_reason TEXT,
     status VARCHAR(50) DEFAULT 'pending',

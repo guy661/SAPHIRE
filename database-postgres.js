@@ -20,10 +20,14 @@ async function init() {
         `);
 
         await client.query(`
-            CREATE TABLE IF NOT EXISTS topics (
+            CREATE TABLE IF NOT EXISTS dashboards (
                 id SERIAL PRIMARY KEY,
-                user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                name VARCHAR(255) NOT NULL,
                 user_intent TEXT,
+                interval_minutes INTEGER,
+                summary_style VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
@@ -31,7 +35,7 @@ async function init() {
         await client.query(`
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                dashboard_id INTEGER NOT NULL REFERENCES dashboards(id) ON DELETE CASCADE,
                 status VARCHAR(50) NOT NULL,
                 meta_summary TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -88,26 +92,50 @@ async function updateUserLanguage(userId, language) {
     await pool.query('UPDATE users SET language = $1 WHERE id = $2', [language, userId]);
 }
 
-async function getTopicByUserId(userId) {
-    const res = await pool.query('SELECT * FROM topics WHERE user_id = $1', [userId]);
+// Dashboard CRUD functions
+async function createDashboard(userId, name, userIntent = '') {
+    const res = await pool.query(
+        'INSERT INTO dashboards (user_id, name, user_intent, updated_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP) RETURNING *',
+        [userId, name, userIntent]
+    );
     return res.rows[0];
 }
 
-async function upsertTopic(userId, { user_intent }) {
-    await pool.query(
-        `INSERT INTO topics (user_id, user_intent, updated_at)
-         VALUES ($1, $2, CURRENT_TIMESTAMP)
-         ON CONFLICT (user_id) DO UPDATE SET
-         user_intent = EXCLUDED.user_intent,
-         updated_at = CURRENT_TIMESTAMP`,
-        [userId, user_intent]
-    );
+async function getDashboardById(dashboardId) {
+    const res = await pool.query('SELECT * FROM dashboards WHERE id = $1', [dashboardId]);
+    return res.rows[0];
 }
 
-async function createJob(jobId, userId, status) {
+async function getDashboardsByUserId(userId) {
+    const res = await pool.query('SELECT * FROM dashboards WHERE user_id = $1 ORDER BY created_at DESC', [userId]);
+    return res.rows;
+}
+
+async function updateDashboardTopic(dashboardId, userIntent) {
+    const res = await pool.query(
+        'UPDATE dashboards SET user_intent = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+        [userIntent, dashboardId]
+    );
+    return res.rows[0];
+}
+
+async function updateDashboardSettings(dashboardId, { name, interval_minutes, summary_style }) {
+    const res = await pool.query(
+        'UPDATE dashboards SET name = $1, interval_minutes = $2, summary_style = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *',
+        [name, interval_minutes, summary_style, dashboardId]
+    );
+    return res.rows[0];
+}
+
+async function deleteDashboard(dashboardId) {
+    await pool.query('DELETE FROM dashboards WHERE id = $1', [dashboardId]);
+}
+
+
+async function createJob(jobId, dashboardId, status) {
     await pool.query(
-        'INSERT INTO jobs (id, user_id, status) VALUES ($1, $2, $3)',
-        [jobId, userId, status]
+        'INSERT INTO jobs (id, dashboard_id, status) VALUES ($1, $2, $3)',
+        [jobId, dashboardId, status]
     );
 }
 
@@ -175,7 +203,7 @@ async function clearDatabase() {
         await client.query('BEGIN');
         await client.query('DELETE FROM articles');
         await client.query('DELETE FROM jobs');
-        await client.query('DELETE FROM topics');
+        await client.query('DELETE FROM dashboards');
         await client.query('DELETE FROM users');
         await client.query('COMMIT');
     } catch (error) {
@@ -189,36 +217,67 @@ async function clearDatabase() {
 async function runMigrations() {
     const client = await pool.connect();
     try {
-        // Migration for topics table (user_intent)
-        const oldTopicsRes = await client.query(`
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='topics' AND column_name='main_topic'
-        `);
-        if (oldTopicsRes.rows.length > 0) {
-            dbLogger.warn('Old schema detected in "topics" table. Running migration...');
-            await client.query('BEGIN');
-            await client.query('ALTER TABLE topics ADD COLUMN IF NOT EXISTS user_intent TEXT;');
-            await client.query('ALTER TABLE topics DROP COLUMN main_topic, DROP COLUMN include_keywords, DROP COLUMN exclude_keywords, DROP COLUMN specification;');
-            await client.query('COMMIT');
-            dbLogger.info('Migration successful: "topics" table updated to new schema.');
-        } else {
-            dbLogger.info('"topics" table schema is up to date.');
+        await client.query('BEGIN');
+        dbLogger.info('Checking for necessary database migrations...');
+
+        // Migration 1: Drop 'topics' table if it exists
+        const topicsTableRes = await client.query("SELECT to_regclass('public.topics')");
+        if (topicsTableRes.rows[0].to_regclass) {
+            dbLogger.warn('Old "topics" table detected. Dropping it...');
+            await client.query('DROP TABLE public.topics CASCADE');
+            dbLogger.info('Migration successful: "topics" table dropped.');
         }
 
-        // Migration for jobs table (meta_summary)
-        const jobsRes = await client.query(`
+        // Migration 2: Check if 'jobs' table needs to be migrated (from user_id to dashboard_id)
+        const jobsColumnRes = await client.query(`
             SELECT column_name 
             FROM information_schema.columns 
-            WHERE table_name='jobs' AND column_name='meta_summary'
+            WHERE table_name='jobs' AND column_name='user_id'
         `);
-        if (jobsRes.rows.length === 0) {
-            dbLogger.warn('Missing "meta_summary" column in "jobs" table. Running migration...');
-            await client.query('ALTER TABLE jobs ADD COLUMN meta_summary TEXT;');
-            dbLogger.info('Migration successful: Added "meta_summary" column to "jobs" table.');
+
+        if (jobsColumnRes.rows.length > 0) {
+            dbLogger.warn('Old schema detected in "jobs" table (user_id column found). Running migration...');
+            
+            // Because old jobs cannot be mapped to non-existent dashboards,
+            // we will clear the dependent tables to ensure consistency.
+            dbLogger.warn('Deleting all records from "articles" and "jobs" to apply new schema...');
+            await client.query('DELETE FROM articles');
+            await client.query('DELETE FROM jobs');
+
+            // Find the foreign key constraint name to drop it
+            const constraintRes = await client.query(`
+                SELECT conname
+                FROM pg_constraint
+                WHERE conrelid = 'jobs'::regclass AND confrelid = 'users'::regclass;
+            `);
+
+            for (const row of constraintRes.rows) {
+                dbLogger.warn(`Dropping foreign key constraint "${row.conname}" on "jobs" table.`);
+                await client.query(`ALTER TABLE jobs DROP CONSTRAINT "${row.conname}"`);
+            }
+            
+            dbLogger.warn('Dropping old "user_id" column from "jobs" table...');
+            await client.query('ALTER TABLE jobs DROP COLUMN user_id');
+
+            dbLogger.warn('Adding new "dashboard_id" column to "jobs" table...');
+            await client.query('ALTER TABLE jobs ADD COLUMN dashboard_id INTEGER NOT NULL');
+            
+            dbLogger.warn('Adding new foreign key constraint for "dashboard_id"...');
+            await client.query(`
+                ALTER TABLE jobs 
+                ADD CONSTRAINT jobs_dashboard_id_fkey 
+                FOREIGN KEY (dashboard_id) 
+                REFERENCES dashboards(id) 
+                ON DELETE CASCADE
+            `);
+            
+            dbLogger.info('Migration successful: "jobs" table updated.');
         } else {
             dbLogger.info('"jobs" table schema is up to date.');
         }
+
+        await client.query('COMMIT');
+        dbLogger.info('Database migrations checked successfully.');
 
     } catch (error) {
         await client.query('ROLLBACK');
@@ -239,8 +298,14 @@ module.exports = {
     getUserByUsername,
     getUserById,
     updateUserLanguage,
-    getTopicByUserId,
-    upsertTopic,
+    // Dashboard functions
+    createDashboard,
+    getDashboardById,
+    getDashboardsByUserId,
+    updateDashboardTopic,
+    updateDashboardSettings,
+    deleteDashboard,
+    // Job functions
     createJob,
     getJob,
     createJobArticle,

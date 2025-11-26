@@ -176,6 +176,15 @@
             const chatForm = document.getElementById('chat-form');
             const chatInput = document.getElementById('chat-input');
             const sendBtn = document.getElementById('send-btn');
+            
+            const urlParams = new URLSearchParams(window.location.search);
+            const dashboardId = urlParams.get('dashboardId');
+
+            if (!dashboardId) {
+                alert('Fehler: Keine Dashboard-ID gefunden. Sie werden zur Hauptseite weitergeleitet.');
+                window.location.href = '/';
+                return;
+            }
 
             const showTypingIndicator = () => {
                 const typingEl = document.createElement('div');
@@ -231,12 +240,16 @@
                 showTypingIndicator();
                 
                 try {
-                    const res = await fetch('/api/personalization-chat', {
+                    const res = await fetch(`/api/dashboards/${dashboardId}/personalization-chat`, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
                         body: JSON.stringify({ message: text })
                     });
                     
+                    if (res.status === 401) {
+                        window.location.href = '/'; // Not authenticated, redirect to main which will show login
+                        return;
+                    }
                     if (!res.ok) {
                          const errorData = await res.json();
                          throw new Error(errorData.message || 'Network response was not ok');
@@ -250,7 +263,12 @@
                     if (botResponse.isDone) {
                         chatInput.disabled = true;
                         sendBtn.disabled = true;
-                        chatInput.placeholder = 'Einstellungen gespeichert!';
+                        chatInput.placeholder = 'Thema gespeichert! Weiterleitung zu den Einstellungen...';
+                        
+                        // Redirect to the next step after a short delay
+                        setTimeout(() => {
+                            window.location.href = `/personalization-interval.html?dashboardId=${dashboardId}`;
+                        }, 1500);
                     }
 
                 } catch (error) {

@@ -3,15 +3,104 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Saphire</title>
+    <title>Saphire Dashboards</title>
     <link rel="stylesheet" href="style.css">
+    <style>
+        /* Sidebar and Menu Styles */
+        body {
+            display: flex;
+        }
+        #sidebar {
+            width: 260px;
+            background-color: #050a10;
+            border-right: 1px solid var(--color-border);
+            padding: 1rem;
+            display: flex;
+            flex-direction: column;
+            transform: translateX(-100%);
+            transition: transform 0.3s ease-in-out;
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100%;
+            z-index: 1000;
+        }
+        #sidebar.open {
+            transform: translateX(0);
+        }
+        main.container {
+            flex-grow: 1;
+            transition: margin-left 0.3s ease-in-out;
+            padding: 1rem;
+        }
+        #sidebar-header {
+            font-size: 1.25rem;
+            font-weight: 600;
+            margin-bottom: 2rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--color-border);
+        }
+        #dashboard-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            flex-grow: 1;
+        }
+        #dashboard-list li a {
+            display: block;
+            padding: 0.75rem 1rem;
+            border-radius: var(--radius-sm);
+            text-decoration: none;
+            color: var(--color-text-secondary);
+            margin-bottom: 0.5rem;
+            transition: background-color 0.2s, color 0.2s;
+        }
+        #dashboard-list li a:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: var(--color-text-primary);
+        }
+        #dashboard-list li a.active {
+            background-color: var(--saphir-blue-transparent);
+            color: var(--color-text-primary);
+            font-weight: 500;
+        }
+        #create-dashboard-btn {
+            margin-top: 1rem;
+        }
+        #menu-toggle-btn {
+            position: fixed;
+            top: 1.5rem;
+            left: 1.5rem;
+            z-index: 1001;
+            background: none;
+            border: none;
+            cursor: pointer;
+            color: var(--color-text-secondary);
+        }
+        #menu-toggle-btn svg { width: 24px; height: 24px; }
+        .content-hidden { display: none !important; }
+    </style>
 </head>
 <body>
 
-    <div class="container">
+    <!-- Sidebar Navigation -->
+    <nav id="sidebar">
+        <h2 id="sidebar-header">Dashboards</h2>
+        <ul id="dashboard-list">
+            <!-- Dynamically populated -->
+        </ul>
+        <button id="create-dashboard-btn" class="btn">Neues Dashboard</button>
+    </nav>
+    
+    <!-- Main Content Area -->
+    <main class="container">
+        <!-- Hamburger Menu Button -->
+        <button id="menu-toggle-btn">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" /></svg>
+        </button>
 
         <!-- Login/Register View -->
-        <div id="auth-view">
+        <div id="auth-view" class="content-hidden">
             <div id="login-form-container" class="form-container fade-in">
                 <h2>Login</h2>
                 <form id="login-form" class="auth-form">
@@ -38,34 +127,48 @@
              <div id="auth-message" class="hidden"></div>
         </div>
 
-        <!-- Main App View -->
-        <div id="app-view" class="hidden">
+        <!-- App View (for when dashboards exist) -->
+        <div id="app-view" class="content-hidden">
             <div class="header">
-                 <h1 id="welcome-message">Willkommen!</h1>
+                 <h1 id="dashboard-title">Dashboard</h1>
                 <nav class="header-nav">
-                    <a href="/personalization">Personalisierung</a>
-                    <a href="#" id="logout-btn">Logout</a>
+                    <button id="edit-dashboard-btn" class="btn-secondary">Dashboard bearbeiten</button>
+                    <button id="logout-btn" class="btn-danger">Logout</button>
                 </nav>
             </div>
            
-            <div id="dashboard">
+            <div id="dashboard-content">
                 <div class="dashboard-controls">
-                    <button id="start-search-btn" class="btn">Starte die Artikelsuche</button>
+                    <button id="start-search-btn" class="btn">Erste Meta-Zusammenfassung erstellen</button>
                 </div>
                 <div id="spinner" class="spinner hidden"></div>
                 <div id="meta-summary-container"></div>
                 <div id="articles-container"></div>
-                 <div id="job-status-message" class="hidden"></div>
+                <div id="job-status-message" class="hidden"></div>
             </div>
         </div>
-    </div>
+        
+        <!-- Empty State View (for new users) -->
+        <div id="empty-state-view" class="content-hidden" style="text-align: center; margin-top: 10rem;">
+             <h1 style="font-size: 2rem;">Willkommen!</h1>
+             <p style="color: var(--color-text-secondary); margin-block: 1rem 2rem;">Erstellen Sie Ihr erstes personalisiertes Dashboard, um zu beginnen.</p>
+             <button id="create-first-dashboard-btn" class="btn btn-lg">Dashboard personalisieren</button>
+        </div>
 
-
+    </main>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
+    // --- Global State ---
+    let dashboards = [];
+    let activeDashboardId = null;
+    let pollInterval;
+
+    // --- Element References ---
+    const mainContainer = document.querySelector('main.container');
     const authView = document.getElementById('auth-view');
     const appView = document.getElementById('app-view');
+    const emptyStateView = document.getElementById('empty-state-view');
     const loginFormContainer = document.getElementById('login-form-container');
     const registerFormContainer = document.getElementById('register-form-container');
     const loginForm = document.getElementById('login-form');
@@ -73,103 +176,212 @@ document.addEventListener('DOMContentLoaded', () => {
     const showRegisterLink = document.getElementById('show-register-link');
     const showLoginLink = document.getElementById('show-login-link');
     const authMessage = document.getElementById('auth-message');
-    const welcomeMessage = document.getElementById('welcome-message');
+    const dashboardTitle = document.getElementById('dashboard-title');
     const logoutBtn = document.getElementById('logout-btn');
     const startSearchBtn = document.getElementById('start-search-btn');
     const spinner = document.getElementById('spinner');
     const articlesContainer = document.getElementById('articles-container');
     const jobStatusMessage = document.getElementById('job-status-message');
     const metaSummaryContainer = document.getElementById('meta-summary-container');
+    const sidebar = document.getElementById('sidebar');
+    const menuToggleBtn = document.getElementById('menu-toggle-btn');
+    const dashboardList = document.getElementById('dashboard-list');
+    const createDashboardBtn = document.getElementById('create-dashboard-btn');
+    const createFirstDashboardBtn = document.getElementById('create-first-dashboard-btn');
+    const editDashboardBtn = document.getElementById('edit-dashboard-btn');
 
-    let pollInterval;
+
+    // =================================================================
+    // Global Fetch Wrapper
+    // =================================================================
+    async function authenticatedFetch(url, options = {}) {
+        const defaultHeaders = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        };
+        const finalOptions = {
+            ...options,
+            headers: { ...defaultHeaders, ...options.headers },
+            credentials: 'include'
+        };
+
+        try {
+            const response = await fetch(url, finalOptions);
+            if (response.status === 401) {
+                showView('auth');
+                throw new Error('Unauthorized');
+            }
+            if (!response.ok) {
+                const errorBody = await response.json().catch(() => ({ error: 'Request failed with status ' + response.status }));
+                throw new Error(errorBody.error || 'An unknown error occurred');
+            }
+            if (response.status === 204) return;
+            return await response.json();
+        } catch (error) {
+            console.error(`API call to ${url} failed:`, error.message);
+            throw error;
+        }
+    }
+
+    // =================================================================
+    // View Management
+    // =================================================================
+    function showView(viewName) {
+        [authView, appView, emptyStateView].forEach(v => v.classList.add('content-hidden'));
+        if (pollInterval) clearInterval(pollInterval);
+
+        let viewToShow;
+        switch(viewName) {
+            case 'auth':
+                viewToShow = authView;
+                sidebar.classList.remove('open');
+                mainContainer.style.marginLeft = '0';
+                break;
+            case 'app':
+                viewToShow = appView;
+                sidebar.classList.add('open');
+                mainContainer.style.marginLeft = '260px';
+                break;
+            case 'empty':
+                viewToShow = emptyStateView;
+                sidebar.classList.add('open');
+                mainContainer.style.marginLeft = '260px';
+                break;
+        }
+        if (viewToShow) viewToShow.classList.remove('content-hidden');
+    }
 
     // =================================================================
     // Initial Check for Session
     // =================================================================
     (async function checkSession() {
         try {
-            const res = await fetch('/api/user');
-            if (res.ok) {
-                const user = await res.json();
-                showAppView(user);
-            } else {
-                showAuthView();
-            }
+            await authenticatedFetch('/api/user');
+            await loadDashboards();
         } catch (error) {
-            console.error("Session check failed:", error);
-            showAuthView();
+            if (error.message === 'Unauthorized') showView('auth');
+            else console.error("Session check failed:", error);
         }
     })();
 
     // =================================================================
-    // View Toggling
+    // Dashboard & App Logic
     // =================================================================
-    function showAuthView() {
-        authView.classList.remove('hidden');
-        appView.classList.add('hidden');
-        if (pollInterval) clearInterval(pollInterval);
+    async function loadDashboards() {
+        try {
+            dashboards = await authenticatedFetch('/api/dashboards');
+            renderSidebar();
+            if (dashboards.length === 0) {
+                showView('empty');
+            } else {
+                setActiveDashboard(dashboards[0].id);
+                showView('app');
+            }
+        } catch (error) {
+             if (error.message !== 'Unauthorized') {
+                alert('Fehler beim Laden der Dashboards.');
+             }
+        }
     }
 
-    function showAppView(user) {
-        welcomeMessage.textContent = `Willkommen, ${user.username}!`;
-        authView.style.transition = 'opacity 0.3s ease-out';
-        authView.style.opacity = '0';
-        setTimeout(() => {
-            authView.classList.add('hidden');
-            appView.classList.remove('hidden');
-            appView.style.opacity = '0';
-            setTimeout(() => {  appView.style.transition = 'opacity 0.5s ease-in'; appView.style.opacity = '1'; }, 50);
-        }, 300);
+    function renderSidebar() {
+        dashboardList.innerHTML = '';
+        dashboards.forEach(db => {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.href = '#';
+            a.textContent = db.name;
+            a.dataset.dashboardId = db.id;
+            if (db.id === activeDashboardId) {
+                a.classList.add('active');
+            }
+            a.addEventListener('click', (e) => {
+                e.preventDefault();
+                setActiveDashboard(db.id);
+            });
+            li.appendChild(a);
+            dashboardList.appendChild(li);
+        });
+    }
+
+    function setActiveDashboard(dashboardId) {
+        activeDashboardId = dashboardId;
+        const activeDashboard = dashboards.find(db => db.id === activeDashboardId);
+        if (!activeDashboard) return;
+        
+        dashboardTitle.textContent = activeDashboard.name;
+        document.querySelectorAll('#dashboard-list a').forEach(a => {
+            a.classList.toggle('active', a.dataset.dashboardId == activeDashboardId);
+        });
+        
+        // Clear previous content and render new dashboard state
+        resetDashboardView();
+        // TODO: Check if a job/summary already exists for this dashboard and render it.
     }
     
-    function switchAuthForm(show, hide) {
-        hide.classList.add('fade-out');
-        authMessage.classList.add('hidden');
-
-        setTimeout(() => {
-            hide.classList.add('hidden');
-            hide.classList.remove('fade-out');
-            
-            show.classList.remove('hidden');
-            setTimeout(() => {
-                show.classList.add('fade-in');
-            }, 10);
-
-        }, 500);
+    function resetDashboardView() {
+        if (pollInterval) clearInterval(pollInterval);
+        spinner.classList.add('hidden');
+        articlesContainer.innerHTML = '';
+        metaSummaryContainer.innerHTML = '';
+        jobStatusMessage.classList.add('hidden');
+        startSearchBtn.disabled = false;
+        startSearchBtn.textContent = 'Erste Meta-Zusammenfassung erstellen'; // Reset button text
     }
 
-    showRegisterLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        switchAuthForm(registerFormContainer, loginFormContainer);
-    });
+    async function handleCreateDashboard() {
+        const name = prompt("Wie soll Ihr neues Dashboard heißen?", `Dashboard ${dashboards.length + 1}`);
+        if (!name) return;
 
-    showLoginLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        switchAuthForm(loginFormContainer, registerFormContainer);
-    });
+        try {
+            const newDashboard = await authenticatedFetch('/api/dashboards', {
+                method: 'POST',
+                body: JSON.stringify({ name }),
+            });
+            // Redirect to personalization chat
+            window.location.href = `/personalization-chat.html?dashboardId=${newDashboard.id}`;
+        } catch (error) {
+            alert(`Fehler beim Erstellen des Dashboards: ${error.message}`);
+        }
+    }
 
+    createDashboardBtn.addEventListener('click', handleCreateDashboard);
+    createFirstDashboardBtn.addEventListener('click', handleCreateDashboard);
+    
+    menuToggleBtn.addEventListener('click', () => {
+        sidebar.classList.toggle('open');
+        mainContainer.style.marginLeft = sidebar.classList.contains('open') ? '260px' : '0';
+    });
+    
+    editDashboardBtn.addEventListener('click', () => {
+        if (!activeDashboardId) return;
+        const choice = prompt("Was möchten Sie bearbeiten? Tippen Sie 'Thema' oder 'Intervall'.");
+        if (choice?.toLowerCase() === 'thema') {
+            window.location.href = `/personalization-chat.html?dashboardId=${activeDashboardId}`;
+        } else if (choice?.toLowerCase() === 'intervall') {
+             window.location.href = `/personalization-interval.html?dashboardId=${activeDashboardId}`;
+        }
+    });
 
     // =================================================================
-    // Authentication Logic
+    // Authentication Logic (Largely unchanged, but integrated with new view manager)
     // =================================================================
     loginForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const username = document.getElementById('login-username').value;
         const password = document.getElementById('login-password').value;
         try {
-            const res = await fetch('/api/login', {
+            await fetch('/api/login', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password }),
-            });
-            const data = await res.json();
-            if (res.ok) {
-                showAppView(data);
-            } else {
-                displayAuthMessage(data.error || 'Login fehlgeschlagen.', 'error');
-            }
+            }).then(res => res.json().then(data => {
+                if(!res.ok) throw new Error(data.error);
+                return data;
+            }));
+            await loadDashboards();
         } catch (error) {
-            displayAuthMessage('Netzwerkfehler beim Login.', 'error');
+            displayAuthMessage(error.message || 'Login fehlgeschlagen.', 'error');
         }
     });
 
@@ -179,66 +391,59 @@ document.addEventListener('DOMContentLoaded', () => {
         const password = document.getElementById('register-password').value;
         const language = document.getElementById('register-language').value;
         try {
-            const res = await fetch('/api/register', {
+            await fetch('/api/register', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ username, password, language }),
-            });
-            const data = await res.json();
-            if (res.ok) {
-                showAppView(data);
-            } else {
-                displayAuthMessage(data.error || 'Registrierung fehlgeschlagen.', 'error');
-            }
+            }).then(res => res.json().then(data => {
+                if(!res.ok) throw new Error(data.error);
+                return data;
+            }));
+            await loadDashboards();
         } catch (error) {
-            displayAuthMessage('Netzwerkfehler bei der Registrierung.', 'error');
+            displayAuthMessage(error.message || 'Registrierung fehlgeschlagen.', 'error');
         }
     });
 
     logoutBtn.addEventListener('click', async () => {
+        showView('auth'); 
         try {
-            await fetch('/api/logout', { method: 'POST' });
-        } finally {
-            appView.style.transition = 'opacity 0.3s ease-out';
-            appView.style.opacity = '0';
-            setTimeout(() => {
-                showAuthView();
-                appView.style.opacity = '1';
-                switchAuthForm(loginFormContainer, registerFormContainer);
-            }, 300);
+            await authenticatedFetch('/api/logout', { method: 'POST' });
+        } catch (error) {
+             if (error.message !== 'Unauthorized') {
+                console.error('Logout failed on server, but user is logged out on client.', error);
+             }
         }
     });
 
+    // Helpers for auth forms
     function displayAuthMessage(message, type) {
         authMessage.textContent = message;
         authMessage.className = 'message-box ' + (type === 'success' ? 'success-message' : 'error-message');
         authMessage.classList.remove('hidden');
     }
+     showRegisterLink.addEventListener('click', (e) => { e.preventDefault(); switchAuthForm(registerFormContainer, loginFormContainer); });
+     showLoginLink.addEventListener('click', (e) => { e.preventDefault(); switchAuthForm(loginFormContainer, registerFormContainer); });
+     function switchAuthForm(show, hide) { hide.classList.add('fade-out'); authMessage.classList.add('hidden'); setTimeout(() => { hide.classList.add('hidden'); hide.classList.remove('fade-out'); show.classList.remove('hidden'); setTimeout(() => { show.classList.add('fade-in'); }, 10); }, 500); }
 
 
     // =================================================================
-    // Main App Logic
+    // Job & Search Logic (Refactored for Dashboards)
     // =================================================================
     startSearchBtn.addEventListener('click', async () => {
+        if (!activeDashboardId) {
+            alert("Bitte wählen Sie zuerst ein Dashboard aus.");
+            return;
+        }
+        
         startSearchBtn.disabled = true;
         spinner.classList.remove('hidden');
-        articlesContainer.innerHTML = '';
-        metaSummaryContainer.innerHTML = '';
-        jobStatusMessage.classList.add('hidden');
+        resetDashboardView();
 
         try {
-            const res = await fetch('/api/rss', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({}) // Empty body for now
+            const data = await authenticatedFetch(`/api/dashboards/${activeDashboardId}/run-search`, {
+                method: 'POST'
             });
-
-            if (!res.ok) {
-                const data = await res.json();
-                throw new Error(data.error || "Unbekannter Fehler beim Start der Suche.");
-            }
-            
-            const data = await res.json();
 
             if (data.jobId) {
                 displayJobStatus(`Suche gestartet (Job ID: ${data.jobId}). Ergebnisse werden geladen...`, 'info');
@@ -250,6 +455,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
         } catch (error) {
+            if (error.message === 'Unauthorized') return;
             displayJobStatus(`Fehler: ${error.message}`, 'error');
             spinner.classList.add('hidden');
             startSearchBtn.disabled = false;
@@ -261,12 +467,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
         pollInterval = setInterval(async () => {
             try {
-                const res = await fetch(`/api/job/${jobId}`);
-                if (!res.ok) {
-                    throw new Error("Serverfehler beim Abrufen des Jobstatus.");
-                }
-                
-                const data = await res.json();
+                const data = await authenticatedFetch(`/api/job/${jobId}`);
 
                 if (data.status === 'processing' || data.status === 'generating_summary') {
                     const progress = data.articles ? `(${data.articles.filter(a => a.status === 'completed').length} Artikel geprüft)` : '';
@@ -277,6 +478,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     clearInterval(pollInterval);
                     spinner.classList.add('hidden');
                     startSearchBtn.disabled = false;
+                    startSearchBtn.textContent = 'Zusammenfassung erneut erstellen';
                     displayJobStatus('Dein persönliches Briefing ist fertig.', 'success');
                     renderSummary(data);
                 } else if (data.status === 'failed') {
@@ -284,6 +486,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
 
             } catch (error) {
+                if (error.message === 'Unauthorized') return;
                 clearInterval(pollInterval);
                 displayJobStatus(`Fehler beim Abrufen der Ergebnisse: ${error.message}`, 'error');
                 spinner.classList.add('hidden');
@@ -299,28 +502,24 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function renderSummary(data) {
-        articlesContainer.innerHTML = '';
         metaSummaryContainer.innerHTML = '';
-
+        articlesContainer.innerHTML = '';
         if (data.summary) {
-            // Simple Markdown to HTML for headlines and paragraphs
             let summaryHtml = data.summary
-                .replace(/^# (.*$)/gim, '<h1>$1</h1>')
-                .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+                .replace(/^# (.*$)/gim, '<h3>$1</h3>')
+                .replace(/^## (.*$)/gim, '<h4>$1</h4>')
                 .replace(/\n/g, '<br>');
-            
             metaSummaryContainer.innerHTML = summaryHtml;
         }
 
-        const relevantArticles = data.articles.filter(a => a.is_relevant);
-        if (relevantArticles.length > 0) {
-            const sourcesLink = document.createElement('a');
-            sourcesLink.href = `sources.html?jobId=${data.articles[0].job_id}`;
-            sourcesLink.textContent = 'Zu den Quellen';
-            sourcesLink.classList.add('btn'); // Use existing button styling
-            sourcesLink.style.marginTop = '2rem';
-            sourcesLink.style.display = 'inline-block';
-            articlesContainer.appendChild(sourcesLink);
+        if (data.articles && data.articles.filter(a => a.is_relevant).length > 0) {
+             const sourcesLink = document.createElement('a');
+             sourcesLink.href = `sources.html?jobId=${data.articles[0].job_id}`;
+             sourcesLink.textContent = 'Zu den Quellen';
+             sourcesLink.classList.add('btn');
+             sourcesLink.style.marginTop = '2rem';
+             sourcesLink.style.display = 'inline-block';
+             articlesContainer.appendChild(sourcesLink);
         }
     }
 });

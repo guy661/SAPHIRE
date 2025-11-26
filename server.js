@@ -60,20 +60,26 @@ async function main() {
         }
     };
     
-    async function startSearchJob(userId, summaryStyle) {
-        const userTopic = await db.getTopicByUserId(userId);
-        if (!userTopic || !userTopic.user_intent) {
-            throw new Error("User has not defined their intent yet.");
+    async function startSearchJob(dashboardId, userId) {
+        const dashboard = await db.getDashboardById(dashboardId);
+        if (!dashboard || dashboard.user_id !== userId) {
+            throw new Error("Dashboard not found or access denied.");
+        }
+        if (!dashboard.user_intent) {
+            throw new Error("Dashboard has no user intent defined yet.");
         }
 
+        serverLogger.info(`Starting search job for dashboard ${dashboardId}: "${dashboard.name}"`);
+        const user = await db.getUserById(userId);
+
         serverLogger.info('Generating smart search queries from user intent...');
-        const searchQueries = await generateSearchQueriesTask({ data: { user_intent: userTopic.user_intent, language: 'de' }});
+        const searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' }});
         serverLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
 
         const allArticles = new Map();
         for (const query of searchQueries) {
             serverLogger.info(`Performing search for: "${query}"`);
-            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=de&gl=DE&ceid=DE:de`;
+            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${user.language}&gl=DE&ceid=DE:${user.language}`;
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -106,19 +112,18 @@ async function main() {
         }
 
         const jobId = randomUUID();
-        await db.createJob(jobId, userId, 'processing', summaryStyle);
+        await db.createJob(jobId, dashboardId, 'processing');
 
         for (const article of articlesToCheck) {
             const jobArticle = await db.createJobArticle(jobId, article);
             await fetchQueue.add('fetch', {
                 articleId: jobArticle.id,
                 url: jobArticle.link,
-                userId: userId,
-                userTopic: userTopic // Pass the whole topic object
+                dashboardId: dashboardId
             });
         }
 
-        serverLogger.info(`Job ${jobId} created. Queued ${articlesToCheck.length} articles.`);
+        serverLogger.info(`Job ${jobId} created. Queued ${articlesToCheck.length} articles for dashboard ${dashboardId}.`);
         return jobId;
     }
 
@@ -180,27 +185,106 @@ async function main() {
         }
     });
 
-    // --- CORE API ROUTES ---
-
-    app.post("/api/rss", isAuthenticated, async (req, res) => {
-        serverLogger.info(`/api/rss POST route started for user ${req.session.userId}`);
-        const { summaryStyle } = req.body;
-
+    // --- DASHBOARD CRUD API ---
+    app.get('/api/dashboards', isAuthenticated, async (req, res) => {
         try {
-            const jobId = await startSearchJob(req.session.userId, summaryStyle);
+            const dashboards = await db.getDashboardsByUserId(req.session.userId);
+            res.json(dashboards);
+        } catch (error) {
+            serverLogger.error(`Error fetching dashboards for user ${req.session.userId}:`, error);
+            res.status(500).json({ error: 'Failed to fetch dashboards' });
+        }
+    });
+
+    app.post('/api/dashboards', isAuthenticated, async (req, res) => {
+        const { name } = req.body;
+        if (!name) return res.status(400).json({ error: 'Dashboard name is required' });
+        try {
+            const newDashboard = await db.createDashboard(req.session.userId, name);
+            res.status(201).json(newDashboard);
+        } catch (error) {
+            serverLogger.error(`Error creating dashboard for user ${req.session.userId}:`, error);
+            res.status(500).json({ error: 'Failed to create dashboard' });
+        }
+    });
+
+    app.get('/api/dashboards/:id', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        try {
+            const dashboard = await db.getDashboardById(parseInt(id, 10));
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(404).json({ error: "Dashboard not found or access denied" });
+            }
+            res.json(dashboard);
+        } catch (error) {
+            serverLogger.error(`Error fetching dashboard ${id} for user ${req.session.userId}:`, error);
+            res.status(500).json({ error: 'Failed to fetch dashboard' });
+        }
+    });
+
+    app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        const { name, interval_minutes, summary_style } = req.body;
+        try {
+            const dashboard = await db.getDashboardById(id);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+            const updatedDashboard = await db.updateDashboardSettings(id, { name, interval_minutes, summary_style });
+            res.json(updatedDashboard);
+        } catch (error) {
+            serverLogger.error(`Error updating dashboard ${id}:`, error);
+            res.status(500).json({ error: 'Failed to update dashboard' });
+        }
+    });
+
+    app.delete('/api/dashboards/:id', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        try {
+            const dashboard = await db.getDashboardById(id);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+            await db.deleteDashboard(id);
+            res.status(204).send();
+        } catch (error) {
+            serverLogger.error(`Error deleting dashboard ${id}:`, error);
+            res.status(500).json({ error: 'Failed to delete dashboard' });
+        }
+    });
+
+    // --- CORE API ROUTES (Refactored) ---
+
+    app.post("/api/dashboards/:id/run-search", isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        serverLogger.info(`/api/dashboards/${id}/run-search POST route started for user ${req.session.userId}`);
+        
+        try {
+            const jobId = await startSearchJob(parseInt(id, 10), req.session.userId);
             if (!jobId) {
-                return res.status(200).json({ jobId: null, message: "No articles found for your topic." });
+                return res.status(200).json({ jobId: null, message: "No articles found for this dashboard's topic." });
             }
             res.status(202).json({ jobId });
 
         } catch (err) {
-            serverLogger.error('Error in /api/rss:', err);
+            serverLogger.error('Error in /api/dashboards/:id/run-search:', err);
             res.status(500).json({ error: err.message || "Error during article search" });
         }
     });
     
-    app.post('/api/personalization-chat', isAuthenticated, async (req, res) => {
+    app.post('/api/dashboards/:id/personalization-chat', isAuthenticated, async (req, res) => {
+        const { id: dashboardId } = req.params;
         const userMessage = req.body.message;
+
+         // Ensure dashboard belongs to user
+        try {
+            const dashboard = await db.getDashboardById(dashboardId);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+        } catch (error) {
+             return res.status(500).json({ message: 'Database error while checking dashboard ownership.' });
+        }
 
          if (!req.session.chatHistory) {
             req.session.chatHistory = [];
@@ -222,7 +306,7 @@ async function main() {
                 req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
                 res.json({ message: result.message, suggestions: result.suggestions || [] });
             } else if (result.action === 'save') {
-                await db.upsertTopic(req.session.userId, result.data);
+                await db.updateDashboardTopic(dashboardId, result.data.user_intent);
                 req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
                 res.json({ message: result.message, isDone: true });
                 delete req.session.chatHistory; 
@@ -240,7 +324,11 @@ async function main() {
         try {
             const job = await db.getJob(id);
             if (!job) return res.status(200).json({ status: 'pending', articles: [] });
-            if (job.user_id !== req.session.userId) return res.status(403).json({ error: "Forbidden" });
+            
+            const dashboard = await db.getDashboardById(job.dashboard_id);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
 
             const allArticles = await db.getJobArticles(id);
             const isProcessingComplete = !allArticles.some(a => ['pending', 'processing'].includes(a.status));
@@ -256,12 +344,12 @@ async function main() {
 
                 let summary = 'No relevant articles found to generate a summary.';
                 if (relevantArticles.length > 0) {
-                    const userTopic = await db.getTopicByUserId(job.user_id);
+                    const user = await db.getUserById(dashboard.user_id);
                     summary = await generateMetaSummaryTask({
                         data: {
                             articles: relevantArticles,
-                            user_intent: userTopic.user_intent,
-                            language: req.session.language || 'de'
+                            user_intent: dashboard.user_intent,
+                            language: user.language || 'de'
                         }
                     });
                 }
@@ -288,9 +376,20 @@ async function main() {
         res.sendFile(path.join(__dirname, 'public', 'saphire.html'));
     });
 
-    app.get('/personalization', (req, res) => {
-        res.set('Cache-control', 'no-store');
-        res.sendFile(path.join(__dirname, 'public', 'personalization-chat.html'));
+    // Adjusted to accept dashboard ID in the URL for context
+    app.get('/personalization/:dashboardId', isAuthenticated, async (req, res) => {
+        const { dashboardId } = req.params;
+        try {
+            const dashboard = await db.getDashboardById(dashboardId);
+            if (dashboard && dashboard.user_id === req.session.userId) {
+                res.set('Cache-control', 'no-store');
+                res.sendFile(path.join(__dirname, 'public', 'personalization-chat.html'));
+            } else {
+                res.status(403).send('Forbidden or Not Found');
+            }
+        } catch (error) {
+            res.status(500).send('Server Error');
+        }
     });
     
     app.use(express.static(path.join(__dirname, 'public')));
