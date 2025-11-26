@@ -50,16 +50,10 @@
            
             <div id="dashboard">
                 <div class="dashboard-controls">
-                    <div class="form-group">
-                        <label for="summary-style">Stil der Zusammenfassung</label>
-                        <select id="summary-style">
-                            <option value="paragraph" selected>Absatz</option>
-                            <option value="bullets">Stichpunkte</option>
-                        </select>
-                    </div>
                     <button id="start-search-btn" class="btn">Starte die Artikelsuche</button>
                 </div>
                 <div id="spinner" class="spinner hidden"></div>
+                <div id="meta-summary-container"></div>
                 <div id="articles-container"></div>
                  <div id="job-status-message" class="hidden"></div>
             </div>
@@ -85,7 +79,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const spinner = document.getElementById('spinner');
     const articlesContainer = document.getElementById('articles-container');
     const jobStatusMessage = document.getElementById('job-status-message');
-    const summaryStyleSelect = document.getElementById('summary-style');
+    const metaSummaryContainer = document.getElementById('meta-summary-container');
 
     let pollInterval;
 
@@ -118,7 +112,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function showAppView(user) {
         welcomeMessage.textContent = `Willkommen, ${user.username}!`;
-        // Quick fade out of auth view and fade in of app view
         authView.style.transition = 'opacity 0.3s ease-out';
         authView.style.opacity = '0';
         setTimeout(() => {
@@ -138,12 +131,11 @@ document.addEventListener('DOMContentLoaded', () => {
             hide.classList.remove('fade-out');
             
             show.classList.remove('hidden');
-            // A tiny delay to allow the DOM to update before adding the fade-in class
             setTimeout(() => {
                 show.classList.add('fade-in');
             }, 10);
 
-        }, 500); // This timeout should match the animation duration in CSS
+        }, 500);
     }
 
     showRegisterLink.addEventListener('click', (e) => {
@@ -207,13 +199,11 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             await fetch('/api/logout', { method: 'POST' });
         } finally {
-            // Reverse the app view transition
             appView.style.transition = 'opacity 0.3s ease-out';
             appView.style.opacity = '0';
             setTimeout(() => {
                 showAuthView();
-                appView.style.opacity = '1'; // Reset for next time
-                 // Reset forms to default
+                appView.style.opacity = '1';
                 switchAuthForm(loginFormContainer, registerFormContainer);
             }, 300);
         }
@@ -233,14 +223,14 @@ document.addEventListener('DOMContentLoaded', () => {
         startSearchBtn.disabled = true;
         spinner.classList.remove('hidden');
         articlesContainer.innerHTML = '';
+        metaSummaryContainer.innerHTML = '';
         jobStatusMessage.classList.add('hidden');
-        const summaryStyle = summaryStyleSelect.value;
 
         try {
             const res = await fetch('/api/rss', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ summaryStyle })
+                body: JSON.stringify({}) // Empty body for now
             });
 
             if (!res.ok) {
@@ -250,14 +240,8 @@ document.addEventListener('DOMContentLoaded', () => {
             
             const data = await res.json();
 
-            if (data.status === 'clarification_needed') {
-                // The AI needs more information, redirect to the clarification page.
-                window.location.href = '/clarification';
-                return;
-            }
-
             if (data.jobId) {
-                displayJobStatus(`Suche gestartet (Job ID: ${data.jobId}). Ergebnisse werden geladen...`, 'success');
+                displayJobStatus(`Suche gestartet (Job ID: ${data.jobId}). Ergebnisse werden geladen...`, 'info');
                 pollJobStatus(data.jobId);
             } else {
                 displayJobStatus(data.message || 'Keine neuen Artikel für Ihr Thema gefunden.', 'success');
@@ -283,14 +267,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 
                 const data = await res.json();
-                renderArticles(data.articles);
 
-                if (data.status === 'completed' || data.status === 'failed') {
+                if (data.status === 'processing' || data.status === 'generating_summary') {
+                    const progress = data.articles ? `(${data.articles.filter(a => a.status === 'completed').length} Artikel geprüft)` : '';
+                    displayJobStatus(`Briefing wird erstellt... ${progress}`, 'info');
+                }
+
+                if (data.status === 'completed') {
                     clearInterval(pollInterval);
                     spinner.classList.add('hidden');
                     startSearchBtn.disabled = false;
-                    const relevantCount = data.articles.filter(a => a.is_relevant).length;
-                    displayJobStatus(`Suche abgeschlossen. ${relevantCount} relevante Artikel gefunden.`, 'success');
+                    displayJobStatus('Dein persönliches Briefing ist fertig.', 'success');
+                    renderSummary(data);
+                } else if (data.status === 'failed') {
+                    throw new Error("Job fehlgeschlagen. Überprüfe die Server-Logs.");
                 }
 
             } catch (error) {
@@ -299,56 +289,38 @@ document.addEventListener('DOMContentLoaded', () => {
                 spinner.classList.add('hidden');
                 startSearchBtn.disabled = false;
             }
-        }, 3000); // Poll every 3 seconds
+        }, 3000);
     }
     
     function displayJobStatus(message, type) {
         jobStatusMessage.textContent = message;
-        jobStatusMessage.className = 'message-box ' + (type === 'success' ? 'success-message' : 'error-message');
+        jobStatusMessage.className = 'message-box ' + (type === 'success' ? 'success-message' : (type === 'error' ? 'error-message' : 'info-message'));
         jobStatusMessage.classList.remove('hidden');
     }
 
-    function renderArticles(articles) {
-        const relevantArticles = articles.filter(a => a.is_relevant);
+    function renderSummary(data) {
+        articlesContainer.innerHTML = '';
+        metaSummaryContainer.innerHTML = '';
 
-        if (relevantArticles.length === 0 && !spinner.classList.contains('hidden')) {
-             articlesContainer.innerHTML = '<p>Bisher keine relevanten Artikel gefunden. Die Suche läuft noch...</p>';
-            return;
-        }
-        
-        // Track already rendered articles to prevent re-rendering and re-animating them
-        const existingArticleLinks = new Set([...articlesContainer.querySelectorAll('.article h3 a')].map(a => a.href));
-        
-        let newArticlesRendered = false;
-        relevantArticles.forEach((article, index) => {
-            if (existingArticleLinks.has(article.link)) {
-                return; // Skip already rendered article
-            }
-            newArticlesRendered = true;
-
-            const articleEl = document.createElement('div');
-            articleEl.classList.add('article');
-            // Set the custom property for staggered animation
-            articleEl.style.setProperty('--i', index);
+        if (data.summary) {
+            // Simple Markdown to HTML for headlines and paragraphs
+            let summaryHtml = data.summary
+                .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+                .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+                .replace(/\n/g, '<br>');
             
-            let summaryHtml = article.summary.includes('- ') 
-                ? '<ul>' + article.summary.split('\n').map(line => `<li>${line.replace(/^- /, '')}</li>`).join('') + '</ul>'
-                : `<p>${article.summary}</p>`;
+            metaSummaryContainer.innerHTML = summaryHtml;
+        }
 
-            articleEl.innerHTML = `
-                <h3><a href="${article.link}" target="_blank" rel="noopener noreferrer">${article.title}</a></h3>
-                <p class="article-meta">Veröffentlicht: ${new Date(article.pub_date).toLocaleString()}</p>
-                <div class="article-summary">
-                    <strong>Zusammenfassung:</strong>
-                    ${summaryHtml}
-                </div>
-            `;
-            articlesContainer.appendChild(articleEl);
-        });
-
-        // If we only added new articles (didn't wipe the container), remove the placeholder
-        if(newArticlesRendered && articlesContainer.querySelector('p')) {
-             articlesContainer.querySelector('p').remove();
+        const relevantArticles = data.articles.filter(a => a.is_relevant);
+        if (relevantArticles.length > 0) {
+            const sourcesLink = document.createElement('a');
+            sourcesLink.href = `sources.html?jobId=${data.articles[0].job_id}`;
+            sourcesLink.textContent = 'Zu den Quellen';
+            sourcesLink.classList.add('btn'); // Use existing button styling
+            sourcesLink.style.marginTop = '2rem';
+            sourcesLink.style.display = 'inline-block';
+            articlesContainer.appendChild(sourcesLink);
         }
     }
 });

@@ -2,7 +2,7 @@
 import { Worker } from 'bullmq';
 import redisConnection from '../redis.mjs';
 import * as db from '../database-postgres.js';
-import { summarizeArticleTask, semanticCheckTask } from '../task.js';
+import { semanticCheckTask } from '../task.js';
 import { retry, Logger, EMOJIS } from '../utils.js';
 
 const logger = new Logger('Semantic Worker', 'magenta', EMOJIS.semantic);
@@ -21,7 +21,7 @@ const worker = new Worker('semantic-summary', async (job) => {
             throw new Error(`Article ${articleId} or its content is missing from the database.`);
         }
 
-        // 2. Perform the semantic check first to see if the article is relevant
+        // 2. Perform the semantic check
         logger.info(`Starting semantic check for: ${article.link} (Lang: ${language})`);
         const semanticCheckResult = await retry(
             () => semanticCheckTask({ data: { article, userTopic, language } }), 
@@ -32,33 +32,11 @@ const worker = new Worker('semantic-summary', async (job) => {
         const { is_relevant, reason } = semanticCheckResult;
         logger.info(`Article ${articleId} is ${is_relevant ? '' : 'NOT '}relevant. Reason: ${reason}`);
 
-        // 3. If not relevant, update and stop.
-        if (!is_relevant) {
-            await db.updateArticleSemanticRelevance(articleId, false, reason);
-            logger.info(`Job ${job.id}: Finished. Article marked as not relevant.`);
-            return { success: true, relevant: false };
-        }
-
-        // 4. If relevant, proceed with summarization.
-        logger.info(`Starting summary for relevant article: ${article.link}`);
-        
-        const jobInfo = await db.getJob(article.job_id);
-        const summaryStyle = jobInfo.summary_style || 'paragraph';
-        
-        const summaryResult = await retry(
-            () => summarizeArticleTask({ data: { article, language, style: summaryStyle } }),
-            3,
-            2000
-        );
-        const { summary } = summaryResult;
-
-        // 5. Update the database with all the results.
-        logger.info(`Job ${job.id}: Saving final results to database for article ${articleId}.`);
-        await db.updateArticleSummary(articleId, summary);
-        await db.updateArticleSemanticRelevance(articleId, true, reason); // This sets status to 'completed'
+        // 3. Update the database with the relevance result. This also sets the status to 'completed'.
+        await db.updateArticleSemanticRelevance(articleId, is_relevant, reason);
 
         logger.info(`Job ${job.id}: Successfully processed and saved article ${articleId}.`);
-        return { success: true, relevant: true };
+        return { success: true, relevant: is_relevant };
 
     } catch (err) {
         logger.error(`Job ${job.id}: CRITICAL ERROR processing article ${articleId}.`, err);

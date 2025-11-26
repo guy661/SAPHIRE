@@ -19,44 +19,47 @@ const worker = new Worker('fetch', async (job) => {
     try {
         await db.updateArticleStatus(articleId, 'processing');
 
-        // 1. Get the real article URL from the Google News redirect URL (re-added)
+        // 1. Get the real article URL from the Google News redirect URL
         logger.info(`Job ${job.id}: Google News URL detected. Extracting real URL...`);
-        realUrl = await getArticleUrl(googleUrl); // Use the separate getArticleUrl
+        realUrl = await getArticleUrl(googleUrl);
         logger.info(`Job ${job.id}: Real article URL: ${realUrl}`);
         
-        // Update the article with the real URL right away for better tracking
-        // (content and title will be empty for now, updated after extraction)
+        // Update the article with the real URL right away
         await db.updateArticleContent(articleId, '', '', realUrl);
 
-
-        // 2. Extract the article text and title (reverted to single call returning object)
+        // 2. Extract the article text and title
         logger.info(`Job ${job.id}: Parsing content from real URL...`);
-        const { title, content, finalUrl } = await extractArticleText(realUrl); // Call extractArticleText
+        const { title, content, finalUrl } = await extractArticleText(realUrl);
         
-        // No explicit content length check here, as extractArticleText now throws PaywallError for too short content
+        // FIX: Check if content is empty. If so, fail the job and stop.
+        if (!content || content.trim().length === 0) {
+            const failureReason = 'Extracted content was empty or null.';
+            logger.warn(`Job ${job.id}: ${failureReason} for article ${articleId}.`);
+            await db.updateArticleStatus(articleId, 'failed', failureReason);
+            return { success: false, finalUrl: realUrl, reason: failureReason };
+        }
         
         logger.info(`Job ${job.id}: Content extracted. Length: ${content.length}`);
         
-        // 3. Update the database with the content, title, and final URL
+        // 3. Update the database with the extracted content and title
         await db.updateArticleContent(articleId, content, title, finalUrl);
 
-
-        // 4. Get user's language preference and topic for the next stage
+        // 4. Get user's language and topic for the next stage
         const user = await db.getUserById(userId);
         if (!user) throw new Error(`Could not find user with userId ${userId}.`);
         
         const userTopic = await db.getTopicByUserId(user.id);
-        if (!userTopic) throw new Error(`Could not find topic for userId ${userId}.`);
+        if (!userTopic || !userTopic.user_intent) throw new Error(`Could not find topic for userId ${userId}.`);
 
         // 5. Queue the article for the semantic summary stage
         await semanticSummaryQueue.add('semantic-summary', {
             articleId,
-            userTopic,
+            userTopic: userTopic.user_intent, // FIX: Pass the intent string, not the whole object
             language: user?.language || 'de'
         });
 
         logger.info(`Job ${job.id}: Successfully processed and queued for semantic summary: ${articleId}`);
-        return { success: true, finalUrl: realUrl }; // Use realUrl as finalUrl
+        return { success: true, finalUrl: realUrl };
 
     } catch (err) {
         // PaywallError specific handling re-added

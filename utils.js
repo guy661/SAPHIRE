@@ -79,6 +79,33 @@ async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, m
     return response.text();
 }
 
+async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', temperature = 0.5) {
+    if (apiInstances.length === 0) {
+        throw new Error('No API keys provided for Gemini.');
+    }
+
+    const genAI = apiInstances[apiKeyIndex];
+    apiKeyIndex = (apiKeyIndex + 1) % apiInstances.length;
+
+    const generativeModel = genAI.getGenerativeModel({
+        model: model,
+        tools: tools,
+    });
+
+    const chat = generativeModel.startChat({
+        history: chatHistory,
+        generationConfig: {
+            temperature: temperature
+        }
+    });
+
+    const lastMessage = chatHistory[chatHistory.length - 1].parts[0].text;
+    const result = await chat.sendMessage(lastMessage);
+    const response = await result.response;
+    
+    return response.functionCalls() ? response.functionCalls() : response.text();
+}
+
 const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);
 async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed') {
     let lastError = null;
@@ -96,4 +123,4 @@ async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed'
     throw finalError;
 }
 
-module.exports = { getApiKeyCount, callGemini, retry, Logger, EMOJIS };
+module.exports = { getApiKeyCount, callGemini, callGeminiChat, retry, Logger, EMOJIS };

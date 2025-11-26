@@ -23,10 +23,7 @@ async function init() {
             CREATE TABLE IF NOT EXISTS topics (
                 id SERIAL PRIMARY KEY,
                 user_id INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                main_topic TEXT NOT NULL,
-                include_keywords TEXT,
-                exclude_keywords TEXT,
-                specification TEXT,
+                user_intent TEXT,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
@@ -36,7 +33,7 @@ async function init() {
                 id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                 status VARCHAR(50) NOT NULL,
-                summary_style VARCHAR(50) DEFAULT 'paragraph', -- New column
+                meta_summary TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         `);
@@ -49,7 +46,6 @@ async function init() {
                 link TEXT NOT NULL,
                 pub_date TIMESTAMP WITH TIME ZONE,
                 content TEXT,
-                summary TEXT,
                 is_relevant BOOLEAN,
                 relevance_reason TEXT,
                 status VARCHAR(50) DEFAULT 'pending',
@@ -97,31 +93,21 @@ async function getTopicByUserId(userId) {
     return res.rows[0];
 }
 
-async function upsertTopic(userId, { main_topic, include_keywords, exclude_keywords, specification }) {
+async function upsertTopic(userId, { user_intent }) {
     await pool.query(
-        `INSERT INTO topics (user_id, main_topic, include_keywords, exclude_keywords, specification)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO topics (user_id, user_intent, updated_at)
+         VALUES ($1, $2, CURRENT_TIMESTAMP)
          ON CONFLICT (user_id) DO UPDATE SET
-         main_topic = EXCLUDED.main_topic,
-         include_keywords = EXCLUDED.include_keywords,
-         exclude_keywords = EXCLUDED.exclude_keywords,
-         specification = EXCLUDED.specification,
+         user_intent = EXCLUDED.user_intent,
          updated_at = CURRENT_TIMESTAMP`,
-        [userId, main_topic, include_keywords, exclude_keywords, specification]
+        [userId, user_intent]
     );
 }
 
-async function updateTopicSpecification(userId, specification) {
+async function createJob(jobId, userId, status) {
     await pool.query(
-        'UPDATE topics SET specification = $1, updated_at = CURRENT_TIMESTAMP WHERE user_id = $2',
-        [specification, userId]
-    );
-}
-
-async function createJob(jobId, userId, status, summaryStyle = 'paragraph') {
-    await pool.query(
-        'INSERT INTO jobs (id, user_id, status, summary_style) VALUES ($1, $2, $3, $4)',
-        [jobId, userId, status, summaryStyle]
+        'INSERT INTO jobs (id, user_id, status) VALUES ($1, $2, $3)',
+        [jobId, userId, status]
     );
 }
 
@@ -155,10 +141,6 @@ async function updateArticleContent(articleId, content, title, finalUrl) {
     );
 }
 
-async function updateArticleSummary(articleId, summary) {
-    await pool.query('UPDATE articles SET summary = $1 WHERE id = $2', [summary, articleId]);
-}
-
 async function updateArticleSemanticRelevance(articleId, isRelevant, reasoning) {
     await pool.query(
         'UPDATE articles SET is_relevant = $1, relevance_reason = $2, status = $3 WHERE id = $4',
@@ -177,6 +159,13 @@ async function updateJobStatus(jobId, status) {
     await pool.query(
         'UPDATE jobs SET status = $1 WHERE id = $2',
         [status, jobId]
+    );
+}
+
+async function updateJobMetaSummary(jobId, summary) {
+    await pool.query(
+        'UPDATE jobs SET meta_summary = $1 WHERE id = $2',
+        [summary, jobId]
     );
 }
 
@@ -200,17 +189,41 @@ async function clearDatabase() {
 async function runMigrations() {
     const client = await pool.connect();
     try {
-        await client.query(`
-            ALTER TABLE topics ADD COLUMN specification TEXT;
+        // Migration for topics table (user_intent)
+        const oldTopicsRes = await client.query(`
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='topics' AND column_name='main_topic'
         `);
-        dbLogger.info('Migration successful: added "specification" column to "topics" table.');
-    } catch (error) {
-        if (error.code !== '42701') { // 42701 is 'duplicate_column'
-            dbLogger.error('Error running migrations:', error);
-            throw error;
+        if (oldTopicsRes.rows.length > 0) {
+            dbLogger.warn('Old schema detected in "topics" table. Running migration...');
+            await client.query('BEGIN');
+            await client.query('ALTER TABLE topics ADD COLUMN IF NOT EXISTS user_intent TEXT;');
+            await client.query('ALTER TABLE topics DROP COLUMN main_topic, DROP COLUMN include_keywords, DROP COLUMN exclude_keywords, DROP COLUMN specification;');
+            await client.query('COMMIT');
+            dbLogger.info('Migration successful: "topics" table updated to new schema.');
         } else {
-            dbLogger.info('Migration unnecessary: "specification" column already exists.');
+            dbLogger.info('"topics" table schema is up to date.');
         }
+
+        // Migration for jobs table (meta_summary)
+        const jobsRes = await client.query(`
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_name='jobs' AND column_name='meta_summary'
+        `);
+        if (jobsRes.rows.length === 0) {
+            dbLogger.warn('Missing "meta_summary" column in "jobs" table. Running migration...');
+            await client.query('ALTER TABLE jobs ADD COLUMN meta_summary TEXT;');
+            dbLogger.info('Migration successful: Added "meta_summary" column to "jobs" table.');
+        } else {
+            dbLogger.info('"jobs" table schema is up to date.');
+        }
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        dbLogger.error('Error running migrations:', error);
+        throw error;
     } finally {
         client.release();
     }
@@ -228,16 +241,15 @@ module.exports = {
     updateUserLanguage,
     getTopicByUserId,
     upsertTopic,
-    updateTopicSpecification,
     createJob,
     getJob,
     createJobArticle,
     getJobArticles,
     getArticle,
     updateArticleContent,
-    updateArticleSummary,
     updateArticleSemanticRelevance,
     updateArticleStatus,
-    updateJobStatus, // Export the new function
+    updateJobStatus,
+    updateJobMetaSummary,
     clearDatabase,
 };

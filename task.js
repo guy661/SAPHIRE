@@ -1,230 +1,320 @@
-const { retry, callGemini, Logger, EMOJIS } = require('./utils.js');
+const { retry, callGemini, callGeminiChat, Logger, EMOJIS } = require('./utils.js');
 
 const taskLogger = new Logger('Task', 'yellow', EMOJIS.task);
 
-const interrogateTopicTask = async ({ data: { userTopic, language = 'de' } }) => {
-    taskLogger.info(`Starting topic interrogation for: "${userTopic.main_topic}"`);
+const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) => {
+    taskLogger.info(`Orchestrating chat with history length: ${chatHistory.length}`);
 
-    const interrogatePrompts = {
-        'de': (topic) => `
-            Du bist ein hilfsbereiter, brillanter Forschungsassistent. Deine Aufgabe ist es, die Absicht eines Nutzers zu verstehen und ihm zu helfen, sein Forschungsthema zu präzisieren, um die bestmöglichen Ergebnisse zu erzielen.
+    const tools = [
+        {
+            functionDeclarations: [
+                {
+                    name: 'save_intent',
+                    description: 'Saves the user\'s final, confirmed interest profile.',
+                    parameters: {
+                        type: 'OBJECT',
+                        properties: {
+                            user_intent: {
+                                type: 'STRING',
+                                description: 'A detailed, self-contained paragraph describing the user\'s core interest, including any specific angles, perspectives, or things to avoid. This is the complete summary of what the user wants.'
+                            }
+                        },
+                        required: ['user_intent']
+                    }
+                }
+            ]
+        }
+    ];
 
-            **ANALYSIERE DAS FOLGENDE THEMA:**
-            - **Hauptthema:** "${topic.main_topic}"
-            - **Einschluss-Keywords:** "${topic.include_keywords || 'Keine'}"
-            - **Ausschluss-Keywords:** "${topic.exclude_keywords || 'Keine'}"
+    const systemPrompt = {
+        'de': `Du bist ein brillanter, freundlicher und gesprächiger KI-Assistent. Deine Aufgabe ist es, einem Nutzer in einem natürlichen Gespräch dabei zu helfen, seine Interessen für einen personalisierten News-Feed zu definieren.
 
-            **DEINE AUFGABE (folge diesen Schritten):**
+        DEIN ZIEL: Formuliere eine prägnante, reichhaltige Beschreibung der Kerninteressen und der Absicht des Nutzers. Diese Beschreibung sollte in einem einzigen, eigenständigen Paragraphen zusammenfassen, was der Nutzer WIRKLICH sehen möchte.
+        
+        DEIN VERHALTEN:
+        - Sei proaktiv. Beginne locker und frage nach allgemeinen Interessen.
+        - Wenn ein Thema breit ist, gib nicht auf, bis du den spezifischen Blickwinkel oder die Perspektive des Nutzers verstanden hast. Stelle klärende Fragen und mache Vorschläge, um das Thema einzugrenzen.
+        - Triff eine eigene Einschätzung (eine "Prognose"), ob das Thema spezifisch genug ist. Du musst den Nutzer nicht immer explizit fragen, ob es "spezifisch genug" ist. Führe das Gespräch so, dass du die Antwort bekommst.
+        - Am Ende des Gesprächs, wenn du glaubst, die Absicht vollständig erfasst zu haben, fasse sie in einem Paragraphen zusammen und frage den Nutzer explizit um Bestätigung.
+        
+        TOOL-NUTZUNG:
+        - Rufe die Funktion 'save_intent' ERST DANN auf, wenn du die finale, zusammengefasste 'user_intent' formuliert hast UND der Nutzer diese Zusammenfassung bestätigt hat (z.B. mit "Ja, das passt so").
+        - Gib in allen anderen Fällen, in denen du auf eine Antwort wartest oder eine Frage stellst, einfach nur Text zurück.`,
+        'en': `You are a brilliant, friendly, and conversational AI assistant. Your task is to help a user define their interests for a personalized news feed in a natural conversation.
 
-            1.  **BEWERTE DIE SPEZIFITÄT:** Ist das Hauptthema zu breit oder vage für eine präzise Artikelsuche?
-                -   Themen wie "KI", "Gesundheit", "Unfall", "Wissenschaft" sind zu breit.
-                -   Themen wie "Anwendung von neuronalen Netzen in der medizinischen Diagnostik" sind gut.
-
-            2.  **FORMULIERE DEINE ANTWORT (wähle EINE der beiden Optionen):**
-
-                **OPTION A: Wenn das Thema GUT und SPEZIFISCH ist:**
-                -   Antworte mit einem JSON-Objekt, das anzeigt, dass keine Klärung erforderlich ist.
-
-                **OPTION B: Wenn das Thema BREIT oder VAGE ist:**
-                -   Formuliere eine freundliche, hilfreiche Frage, die dem Nutzer das Gefühl gibt, dass du ihm hilfst, nicht dass er einen Fehler gemacht hat.
-                -   Generiere 2 bis 3 **konkrete, spezifischere Themenvorschläge**, die mögliche Unterbereiche des ursprünglichen Themas darstellen. Die Vorschläge sollten als vollständige, eigenständige Themen formuliert sein.
-                -   **Beispiel 1:** Wenn das Thema "Unfall" ist, schlage vor: "Analyse von Verkehrsunfällen mit Fahrerflucht" oder "Prävention von Arbeitsunfällen in der Baubranche".
-                -   **Beispiel 2:** Wenn das Thema "KI" ist, frage: "Das ist ein weites Feld! Interessieren Sie sich mehr für die ethischen Implikationen von KI, für die Anwendung in der Robotik oder für die neuesten Durchbrüche bei Sprachmodellen?" und biete entsprechende Vorschläge an.
-
-            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
-            -   Kein einleitender Text, kein Markdown, nur das JSON.
-            -   **Format für Option A (gutes Thema):**
-                \`{ "needsClarification": false, "question": null, "suggestions": [] }\`
-            -   **Format für Option B (breites Thema):**
-                \`{ "needsClarification": true, "question": "<Deine generierte, hilfreiche Frage>", "suggestions": ["<Vorschlag 1>", "<Vorschlag 2>", "<Vorschlag 3>"] }\`
-        `,
-        'en': (topic) => `
-            You are a helpful, brilliant research assistant. Your job is to understand a user's intent and help them specify their research topic to get the best possible results.
-
-            **ANALYZE THE FOLLOWING TOPIC:**
-            - **Main Topic:** "${topic.main_topic}"
-            - **Include Keywords:** "${topic.include_keywords || 'None'}"
-            - **Exclude Keywords:** "${topic.exclude_keywords || 'None'}"
-
-            **YOUR TASK (follow these steps):**
-
-            1.  **EVALUATE SPECIFICITY:** Is the main topic too broad or vague for a precise article search?
-                -   Topics like "AI", "Health", "Accident", "Science" are too broad.
-                -   Topics like "Application of neural networks in medical diagnostics" are good.
-
-            2.  **FORMULATE YOUR RESPONSE (choose ONE of the two options):**
-
-                **OPTION A: If the topic is GOOD and SPECIFIC:**
-                -   Respond with a JSON object indicating no clarification is needed.
-
-                **OPTION B: If the topic is BROAD or VAGUE:**
-                -   Formulate a friendly, helpful question that makes the user feel you're helping, not that they made a mistake.
-                -   Generate 2 to 3 **concrete, more specific topic suggestions** that represent possible sub-areas of the original topic. The suggestions should be phrased as complete, standalone topics.
-                -   **Example 1:** If the topic is "Accident", suggest: "Analysis of traffic accidents involving hit-and-run" or "Prevention of work accidents in the construction industry".
-                -   **Example 2:** If the topic is "AI", ask: "That's a broad field! Are you more interested in the ethical implications of AI, its application in robotics, or the latest breakthroughs in language models?" and provide corresponding suggestions.
-
-            **RESPOND ONLY WITH A VALID JSON OBJECT:**
-            -   No introductory text, no markdown, just the JSON.
-            -   **Format for Option A (good topic):**
-                \`{ "needsClarification": false, "question": null, "suggestions": [] }\`
-            -   **Format for Option B (broad topic):**
-                \`{ "needsClarification": true, "question": "<Your generated, helpful question>", "suggestions": ["<Suggestion 1>", "<Suggestion 2>", "<Suggestion 3>"] }\`
-        `
+        YOUR GOAL: Formulate a concise, rich description of the user's core interest and intent. This description should summarize in a single, self-contained paragraph what the user REALLY wants to see.
+        
+        YOUR BEHAVIOR:
+        - Be proactive. Start casually and ask for general interests.
+        - If a topic is broad, don't give up until you understand the user's specific angle or perspective. Ask clarifying questions and make suggestions to narrow it down.
+        - Make your own judgment (a "prognosis") about whether the topic is specific enough. You don't always have to explicitly ask the user if it's "specific enough." Guide the conversation to get the answer.
+        - At the end of the conversation, when you believe you have fully captured the intent, summarize it in a paragraph and explicitly ask the user for confirmation.
+        
+        TOOL USAGE:
+        - Call the 'save_intent' function ONLY after you have formulated the final, summarized 'user_intent' AND the user has confirmed that summary (e.g., with "Yes, that looks good").
+        - In all other cases where you are waiting for a response or asking a question, simply return text.`
     };
     
-    const getInterrogatePrompt = interrogatePrompts[language] || interrogatePrompts['de'];
-    const prompt = getInterrogatePrompt(userTopic);
+    const getSystemPrompt = systemPrompt[language] || systemPrompt['de'];
+
+    const fullHistory = [
+        { role: 'user', parts: [{ text: getSystemPrompt }] },
+        { role: 'model', parts: [{ text: "Verstanden. Ich bin bereit zu helfen. Lass uns anfangen!" }] },
+        ...chatHistory
+    ];
 
     try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
-        taskLogger.debug(`Raw AI interrogation response: ${responseString}`);
+        const result = await callGeminiChat(fullHistory, tools, 'gemini-2.5-flash');
+        
+        if (Array.isArray(result)) { // It's a function call
+            const call = result[0];
+            const args = call.args;
+            taskLogger.info(`AI decided to call function '${call.name}' with args:`, args);
+            
+            if (call.name === 'save_intent' && args.user_intent) {
+                 return {
+                    action: 'save',
+                    data: { user_intent: args.user_intent },
+                    message: 'Perfekt! Ich habe deine neuen Einstellungen gespeichert. Du kannst dieses Fenster nun schließen.'
+                };
+            }
+            return { action: 'reply', message: "Ein interner Fehler ist aufgetreten. Die KI hat eine unbekannte Aktion versucht." };
 
-        const jsonMatch = responseString.match(/\{.*\}/s);
-        if (!jsonMatch) {
-            throw new Error('No JSON object found in AI response for interrogation.');
+        } else { // It's a text response
+            taskLogger.info(`AI responded with text: "${result}"`);
+            return {
+                action: 'reply',
+                message: result
+            };
         }
-
-        const decision = JSON.parse(jsonMatch[0]);
-        taskLogger.info(`Parsed AI interrogation for "${userTopic.main_topic}": needsClarification = ${decision.needsClarification}`);
-        return decision;
-
     } catch (error) {
-        taskLogger.error(`Error during topic interrogation for "${userTopic.main_topic}"`, error);
-        // Fallback to a safe response if the AI fails
-        return { needsClarification: false, question: null, suggestions: [] };
+        taskLogger.error('Error during chat orchestration', error);
+        return {
+            action: 'error',
+            message: 'Entschuldigung, es gab einen Fehler im Denkprozess. Lass es uns kurz noch einmal versuchen.'
+        };
     }
 };
 
-const summarizeArticleTask = async ({ data: { article, style = 'paragraph', language = 'de' } }) => {
-    taskLogger.info(`Starting summary for: ${article.link} (Style: ${style}, Lang: ${language})`);
-    
-    if (!article.content || typeof article.content !== 'string') {
-        const error = new Error('Article content is missing or invalid.');
-        taskLogger.error(`Article content is missing or not a string for article ${article.link}.`, error);
-        throw error;
-    }
+const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' } }) => {
+    taskLogger.info(`Generating search queries for intent: "${user_intent.substring(0, 50)}"...`);
 
-    const summarizePrompts = {
-        'de': {
-            'paragraph': `Du bist ein erfahrener Redakteur. Fasse den folgenden Artikel prägnant in **zwei bis drei Sätzen** zusammen. Konzentriere dich auf die Kernaussage und die wichtigsten Schlussfolgerungen. Antworte nur mit der Zusammenfassung, ohne einleitende Floskeln.`,
-            'bullets': `Du bist ein Analyst, der Informationen für ein schnelles Briefing aufbereitet. Extrahiere die **drei bis fünf wichtigsten Kernaussagen** aus dem folgenden Artikel und präsentiere sie als Stichpunkte (mit '-' am Anfang jeder Zeile). Antworte nur mit den Stichpunkten.`
-        },
-        'en': {
-            'paragraph': `You are an expert editor. Concisely summarize the following article in **two to three sentences**. Focus on the core message and key conclusions. Respond only with the summary, without any introductory phrases.`,
-            'bullets': `You are an analyst preparing information for a rapid briefing. Extract the **three to five most important key points** from the following article and present them as bullet points (using '-' at the start of each line). Respond only with the bullet points.`
-        }
+    const genQueryPrompts = {
+        'de': (intent) => `
+            Du bist ein Experte für Suchmaschinenstrategie. Deine Aufgabe ist es, für eine gegebene Nutzerintention die bestmöglichen Suchanfragen für eine **nicht-semantische, keyword-basierte** Suchmaschine wie Google News zu generieren.
+
+            **Nutzerintention:**
+            "${intent}"
+
+            **Deine Aufgabe:**
+            1.  Analysiere die Kernkonzepte der Nutzerintention.
+            2.  Erstelle 3 bis 5 **unterschiedliche Suchanfragen** (Strings).
+            3.  Die Anfragen sollten eine Mischung aus breiteren und spezifischeren Begriffen sein, um die Wahrscheinlichkeit zu maximieren, relevante Artikel zu finden. Kombiniere Keywords auf sinnvolle Weise.
+            4.  Die Anfragen sollten auf Deutsch sein.
+
+            **Beispiel:**
+            - **Nutzerintention:** "Ich interessiere mich für den Einsatz von KI bei der Früherkennung von Lungenkrebs, insbesondere durch die Bildanalyse von CT-Scans."
+            - **Gute Suchanfragen:** ["KI Lungenkrebs Früherkennung", "CT-Scan Bildanalyse maschinelles Lernen", "Deep Learning medizinische Bildgebung Krebsdiagnose", "Künstliche Intelligenz Computertomographie Onkologie"]
+
+            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
+            - Das Objekt muss einen einzigen Schlüssel "queries" enthalten, der ein Array von Strings ist.
+            - Beispiel-Format: \`{ "queries": ["Anfrage 1", "Anfrage 2", "Anfrage 3"] }\`
+        `,
+        'en': (intent) => `
+            You are an expert in search engine strategy. Your task is to generate the best possible search queries for a given user intent, targeting a **non-semantic, keyword-based** search engine like Google News.
+
+            **User Intent:**
+            "${intent}"
+
+            **Your Task:**
+            1.  Analyze the core concepts of the user's intent.
+            2.  Create 3 to 5 **distinct search queries** (strings).
+            3.  The queries should be a mix of broader and more specific terms to maximize the chance of finding relevant articles. Combine keywords in meaningful ways.
+            4.  The queries should be in English.
+
+            **Example:**
+            - **User Intent:** "I'm interested in the application of AI in the early diagnosis of lung cancer, specifically using image analysis of CT scans."
+            - **Good Search Queries:** ["AI lung cancer early diagnosis", "CT scan image analysis machine learning", "deep learning medical imaging cancer detection", "artificial intelligence computed tomography oncology"]
+
+            **RESPOND ONLY WITH A VALID JSON OBJECT:**
+            - The object must contain a single key "queries" which holds an array of strings.
+            - Example Format: \`{ "queries": ["Query 1", "Query 2", "Query 3"] }\`
+        `
     };
 
-    const langPrompts = summarizePrompts[language] || summarizePrompts['de'];
-    const promptTemplate = langPrompts[style] || langPrompts['paragraph'];
+    const prompt = (genQueryPrompts[language] || genQueryPrompts['de'])(user_intent);
     
-    const fullPrompt = `${promptTemplate}\n\nARTIKELTEXT:\n"""\n${article.content.substring(0, 8000)}\n"""`;
+    try {
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
+        taskLogger.debug(`Raw AI query generation response: ${responseString}`);
+        
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error('No JSON object found in AI response for query generation.');
+        
+        const result = JSON.parse(jsonMatch[0]);
+        if (!result.queries || !Array.isArray(result.queries)) throw new Error('Invalid JSON structure in AI response.');
+
+        taskLogger.info(`Generated ${result.queries.length} search queries.`);
+        return result.queries;
+
+    } catch (error) {
+        taskLogger.error('Error during search query generation', error);
+        return [user_intent];
+    }
+};
+
+const generateMetaSummaryTask = async ({ data: { articles, user_intent, language = 'de' } }) => {
+    taskLogger.info(`Generating meta summary for ${articles.length} articles.`);
+
+    const articleTexts = articles.map((a, i) => `ARTIKEL ${i + 1} (Titel: ${a.title}):\n${a.content}\n\n`).join('');
+
+    const metaSummaryPrompts = {
+        'de': (intent, content) => `
+            Du bist ein hochkarätiger Analyst, der ein tägliches Briefing für einen gut informierten Kunden erstellt. Dein Ziel ist es, **ausschließlich über neue Entwicklungen und signifikante Ereignisse** zu berichten.
+
+            **Grundregel:** Dein Kunde kennt sein Interessengebiet bereits. Wiederhole keine grundlegenden, statischen Fakten. Konzentriere dich auf das, was HEUTE neu ist.
+
+            **Kundeninteresse:**
+            "${intent}"
+
+            **Relevante Artikel des Tages:**
+            ${content}
+
+            **Deine Aufgabe:**
+            Synthetisiere aus den Artikeln eine "Entwicklungs-Zusammenfassung", die sich auf die neuesten und wichtigsten Geschehnisse konzentriert.
+
+            **Beispiel zur Verdeutlichung:**
+            - **Kundeninteresse:** "Tech-Aktien"
+            - **FALSCH (zu vermeiden):** "Nvidia ist ein GPU-Hersteller, der sich auf KI konzentriert." (Dies ist bekanntes Grundwissen).
+            - **RICHTIG (erwünscht):** "Nvidia hat heute seine Quartalszahlen vorgelegt und die Erwartungen übertroffen, was zu einem Anstieg des Aktienkurses führte." ODER "Nvidia kündigte die Veröffentlichung eines neuen KI-Chips, des H200, an."
+
+            **Anweisungen für das Briefing:**
+            1.  **Fokus auf Neuigkeiten:** Identifiziere die Kernaussagen der Artikel, die auf neue Ereignisse, Ankündigungen, Zahlen, oder bedeutende Veränderungen hinweisen.
+            2.  **Struktur:**
+                *   Beginne mit einer prägnanten, übergeordneten Überschrift, die die Top-Entwicklung des Tages zusammenfasst.
+                *   Verfasse eine sehr kurze Einleitung (1-2 Sätze), die die wichtigsten neuen Erkenntnisse hervorhebt.
+                *   Gliedere den Hauptteil nach den wichtigsten neuen Themen oder Ereignissen. Gib jedem Abschnitt eine klare Überschrift.
+            3.  **Synthese:** Fasse die neuen Informationen zusammen und stelle Zusammenhänge her. Liste nicht nur Fakten aus den Artikeln auf, sondern baue eine Erzählung darüber, was passiert ist.
+            4.  **Tonfall:** Professionell, auf den Punkt gebracht und analytisch.
+            5.  **Formatierung:** Sauberes Markdown. '#' für die Hauptüberschrift, '##' für die Abschnitte.
+
+            Erstelle jetzt das Entwicklungs-Briefing für den Kunden.
+        `,
+        'en': (intent, content) => `
+            You are a top-tier analyst creating a daily briefing for a well-informed client. Your goal is to report **exclusively on new developments and significant events**.
+
+            **Ground Rule:** Your client already knows their area of interest. Do not repeat basic, static facts. Focus on what is NEW today.
+
+            **Client's Intent:**
+            "${intent}"
+
+            **Relevant Articles for the Day:**
+            ${content}
+
+            **Your Task:**
+            Synthesize a "Development Summary" from the articles, focusing on the latest and most important happenings.
+
+            **Clarifying Example:**
+            - **Client's Intent:** "Tech Stocks"
+            - **WRONG (to avoid):** "Nvidia is a GPU manufacturer that focuses on AI." (This is known, basic information).
+            - **RIGHT (desired):** "Nvidia reported its quarterly earnings today, exceeding expectations and leading to a rise in its stock price." OR "Nvidia announced the release of a new AI chip, the H200."
+
+            **Briefing Instructions:**
+            1.  **Focus on News:** Identify the key statements in the articles that point to new events, announcements, figures, or significant changes.
+            2.  **Structure:**
+                *   Start with a concise, high-level headline that summarizes the top development of the day.
+                *   Write a very brief introduction (1-2 sentences) highlighting the most important new findings.
+                *   Structure the main body by the most important new topics or events. Give each section a clear headline.
+            3.  **Synthesis:** Summarize the new information and create connections. Don't just list facts from the articles; build a narrative about what happened.
+            4.  **Tone:** Professional, to-the-point, and analytical.
+            5.  **Formatting:** Clean Markdown. '#' for the main headline, '##' for sections.
+
+            Now, create the development briefing for the client.
+        `
+    };
+
+    const prompt = (metaSummaryPrompts[language] || metaSummaryPrompts['de'])(user_intent, articleTexts);
 
     try {
-        const summary = await callGemini(fullPrompt, 'gemini-2.5-flash', 0.2);
-        taskLogger.info(`Successfully summarized: ${article.link}`);
-        return { ...article, summary };
+        const summary = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        taskLogger.info(`Successfully generated meta summary.`);
+        return summary;
     } catch (error) {
-        taskLogger.error(`Error summarizing article ${article.link}`, error);
-        throw new Error(`Failed to summarize article: ${error.message}`);
+        taskLogger.error('Error generating meta summary', error);
+        throw new Error(`Failed to generate meta summary: ${error.message}`);
     }
 };
 
 const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' } }) => {
-    taskLogger.info(`Starting semantic check for: ${article.link} (Lang: ${language})`);
+    taskLogger.info(`Performing semantic check for article "${article.title}" against topic "${userTopic}"`);
 
-    if (!article.content || typeof article.content !== 'string') {
-        const error = new Error('Article content is missing or invalid.');
-        taskLogger.error(`Article content is missing or not a string for article ${article.link}.`, error);
-        throw error;
-    }
-    
     const semanticCheckPrompts = {
-        'de': (userTopic, articleText, title) => `
-            Du bist ein anspruchsvoller, intelligenter Gatekeeper für Content. Deine Aufgabe ist es, die wahre Absicht eines Nutzers zu verstehen und zu schützen. Lehne alles ab, was nicht eine direkte und zufriedenstellende Antwort auf das ist, was der Nutzer WIRKLICH wissen wollte. Sei extrem wählerisch.
+        'de': (topic, articleTitle, articleContent) => `
+            Du bist ein intelligenter und kontextbewusster Nachrichtenkurator. Deine Aufgabe ist es, zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse relevant ist. Es geht nicht um einen reinen Keyword-Abgleich, sondern um das Verständnis der Absicht des Nutzers.
 
-            **SCHLÜSSELELEMENTE DER ANALYSE:**
+            **Nutzerinteresse:**
+            "${topic}"
 
-            1.  **Verstehe die Nutzerintention:**
-                -   **Hauptthema:** "${userTopic.main_topic}"
-                -   **Spezifizierung:** "${userTopic.specification || 'Keine'}"
-                -   Stell dir vor, du bist der Nutzer. Was ist die **Frage hinter der Suchanfrage**? Sucht der Nutzer nach einer Einführung, einer tiefen technischen Analyse, einer Nachrichtenmeldung, einer Meinung?
-                -   Versetz dich in die Lage des Nutzers, der nach diesem Thema sucht. Wäre dieser Artikel ein Volltreffer, der die Suche beendet, oder nur ein "vielleicht interessant"? Nur Volltreffer sind relevant.
+            **Artikel:**
+            - **Titel:** "${articleTitle}"
+            - **Inhalt (Auszug):** "${articleContent.substring(0, 2500)}..."
 
-            2.  **Bewerte den Artikelinhalt KRITISCH:**
-                -   **Titel:** "${title}"
-                -   **Text-Ausschnitt:** "${articleText.substring(0, 3000)}..."
+            **Deine Aufgabe:**
+            1.  Verstehe die Kernabsicht und den Kontext des Nutzerinteresses. Was will der Nutzer wirklich erfahren?
+            2.  Beurteile, ob der Artikel einen wertvollen Beitrag zum Interesse des Nutzers leistet. Das bedeutet, er muss nicht exakt das Thema treffen, aber er sollte für jemanden, der sich für dieses Thema interessiert, von Bedeutung sein.
+            3.  **Wichtig:** Artikel, die den weiteren Kontext, Debatten oder kritische Auseinandersetzungen zu einem Thema beleuchten, sind relevant.
+                *   **Beispiel:** Wenn das Nutzerinteresse "neue EU-Gesetzesvorschläge von Ursula von der Leyen" ist, dann ist ein Artikel mit dem Titel "Kritik an geplanter Chatkontrolle wächst" relevant, weil er die Debatte um einen solchen Vorschlag widerspiegelt.
+            4.  Schließe nur Artikel aus, die offensichtlich irrelevant sind oder das Thema nur am Rande erwähnen.
+            5.  Gib eine kurze, klare Begründung für deine Entscheidung (1-2 Sätze).
 
-            3.  **SYNTHESE & ENTSCHEIDUNG (folge diesen Schritten):**
-
-                a. **Ist das Thema des Artikels wirklich das Hauptthema des Nutzers?** Eine bloße Erwähnung von Keywords reicht nicht. Der *Kernfokus* des Artikels muss mit der *Nutzerintention* übereinstimmen. Die Spezifizierung ist hierbei ein entscheidender Hinweis.
-                
-                b. **Keyword-Abgleich (im Kontext der Intention):**
-                   - **Muss enthalten:** "${userTopic.include_keywords || 'Keine'}". Werden diese Konzepte *zentral* und im Sinne der Nutzerintention diskutiert, oder nur am Rande erwähnt? Eine beiläufige Nennung ist wertlos.
-                   - **Muss ausschließen:** "${userTopic.exclude_keywords || 'Keine'}". Das Finden eines dieser Wörter führt zur **sofortigen Irrelevanz**, es sei denn, der Kontext ist eindeutig nicht-exklusiv (z.B. "Unternehmen X, nicht zu verwechseln mit Y").
-
-                c. **FINALES URTEIL:** Würdest du als Nutzer, nachdem du diesen Artikel gelesen hast, deine Suche als erfolgreich betrachten und beenden? Oder würdest du weiter nach besseren Ergebnissen suchen?
-
-            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
-            - Kein einleitender Text, kein Markdown, nur das JSON.
-            - Format: \`{ "is_relevant": <boolean>, "reason": "<Deine prägnante Begründung, warum der Artikel aus Nutzersicht ein Volltreffer ist oder eben nicht.>" }\`
+            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
+            \`{ "is_relevant": <true oder false>, "reason": "<deine Begründung>" }\`
         `,
-        'en': (userTopic, articleText, title) => `
-            You are a sophisticated, intelligent content gatekeeper. Your mission is to understand and protect a user's true intent. Reject anything that isn't a direct and satisfying answer to what the user REALLY wanted to know. Be extremely selective.
+        'en': (topic, articleTitle, articleContent) => `
+            You are an intelligent and context-aware news curator. Your task is to judge whether an article is relevant to a user based on their interest. This is not about pure keyword matching, but about understanding the user's intent.
 
-            **KEY ELEMENTS FOR ANALYSIS:**
+            **User Interest:**
+            "${topic}"
 
-            1.  **Understand User Intent:**
-                -   **Main Topic:** "${userTopic.main_topic}"
-                -   **Specification:** "${userTopic.specification || 'None'}"
-                -   Imagine you are the user. What is the **underlying question** behind this search query? Is the user looking for an introduction, a deep technical analysis, a news update, an opinion piece?
-                -   Put yourself in the user's shoes. Would this article be a "bullseye" hit that ends their search, or just a "maybe interesting" tangent? Only bullseye hits are relevant.
+            **Article:**
+            - **Title:** "${articleTitle}"
+            - **Content (Excerpt):** "${articleContent.substring(0, 2500)}..."
 
-            2.  **Critically Evaluate Article Content:**
-                -   **Title:** "${title}"
-                -   **Article Snippet:** "${articleText.substring(0, 3000)}..."
+            **Your Task:**
+            1.  Understand the core intent and context of the user's interest. What does the user really want to know?
+            2.  Judge whether the article makes a valuable contribution to the user's interest. This means it doesn't have to match the topic exactly, but it should be significant for someone interested in that topic.
+            3.  **Important:** Articles that shed light on the broader context, debates, or critical discussions on a topic are relevant.
+                *   **Example:** If the user's interest is "new EU legislative proposals from Ursula von der Leyen," then an article titled "Criticism of planned 'chat control' is growing" is relevant because it reflects the debate surrounding such a proposal.
+            4.  Only exclude articles that are obviously irrelevant or only mention the topic in passing.
+            5.  Provide a short, clear reason for your decision (1-2 sentences).
 
-            3.  **SYNTHESIS & DECISION (follow these steps):**
-
-                a. **Is the article's topic truly the user's main topic?** A mere mention of keywords is not enough. The *core focus* of the article must align with the *user's intent*. The specification is a critical clue here.
-
-                b. **Keyword Alignment (in the context of intent):**
-                   - **Must Include:** "${userTopic.include_keywords || 'None'}". Are these concepts discussed *centrally* and in line with the user's intent, or just mentioned in passing? A casual mention is worthless.
-                   - **Must Exclude:** "${userTopic.exclude_keywords || 'None'}". Finding one of these words means **immediate irrelevance**, unless the context is clearly non-exclusive (e.g., "Company X, not to be confused with Y").
-
-                c. **FINAL JUDGMENT:** As the user, after reading this article, would you consider your search successful and complete? Or would you continue looking for better results?
-
-            **RESPOND ONLY WITH A VALID JSON OBJECT:**
-            - No introductory text, no markdown, just the JSON.
-            - Format: \`{ "is_relevant": <boolean>, "reason": "<Your concise reasoning explaining why the article is or is not a bullseye hit from the user's perspective.>" }\`
+            **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
+            \`{ "is_relevant": <true or false>, "reason": "<your reason>" }\`
         `
     };
 
-    const getSemanticPrompt = semanticCheckPrompts[language] || semanticCheckPrompts['de'];
-    const prompt = getSemanticPrompt(userTopic, article.content, article.title);
-    
-    taskLogger.info(`Prompt created for ${article.link}.`);
+    const prompt = (semanticCheckPrompts[language] || semanticCheckPrompts['de'])(userTopic, article.title, article.content);
 
     try {
-        const decisionString = await retry(() => callGemini(prompt, 'gemini-2.5-flash', 0.0));
-        taskLogger.debug(`Raw AI response received: ${decisionString}`);
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.2);
+        taskLogger.debug(`Raw AI semantic check response: ${responseString}`);
+
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error('No JSON object found in AI response for semantic check.');
         
-        const jsonMatch = decisionString.match(/\{.*\}/s);
-        if (!jsonMatch) {
-            throw new Error(`No JSON object found in AI response.`);
+        const result = JSON.parse(jsonMatch[0]);
+        if (typeof result.is_relevant !== 'boolean' || typeof result.reason !== 'string') {
+            throw new Error('Invalid JSON structure in AI response for semantic check.');
         }
 
-        const decision = JSON.parse(jsonMatch[0]);
-        taskLogger.debug(`Extracted JSON string: ${jsonMatch[0]}`);
-        taskLogger.info(`Parsed AI decision for ${article.link}: ${decision.is_relevant}.`);
-        
-        return { ...article, is_relevant: decision.is_relevant, reason: decision.reason };
+        taskLogger.info(`Semantic check for article "${article.title}" complete. Relevant: ${result.is_relevant}`);
+        return result;
 
     } catch (error) {
-        taskLogger.error(`Error during semantic check for ${article.link}`, error);
-        throw new Error(`Failed to perform semantic check: ${error.message}`);
+        taskLogger.error(`Error during semantic check for article "${article.title}"`, error);
+        // In case of error, default to not relevant to avoid showing bad content.
+        return { is_relevant: false, reason: `Error during analysis: ${error.message}` };
     }
 };
 
-
-module.exports = { summarizeArticleTask, semanticCheckTask, interrogateTopicTask };
+module.exports = { semanticCheckTask, orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask };

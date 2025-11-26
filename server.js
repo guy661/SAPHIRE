@@ -10,10 +10,9 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
 const { Logger, EMOJIS } = require('./utils.js');
-const { interrogateTopicTask } = require('./task.js');
+const { orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask } = require('./task.js');
 
 const serverLogger = new Logger('Server', 'green', EMOJIS.server);
-const dbLogger = new Logger('Database', 'cyan', EMOJIS.db);
 
 // Session configuration
 const SESS_SECRET = process.env.SESS_SECRET || 'your-default-secret';
@@ -42,10 +41,10 @@ async function main() {
     app.use(session({
         name: 'sid',
         resave: false,
-        saveUninitialized: false,
+        saveUninitialized: true,
         secret: SESS_SECRET,
         cookie: {
-            maxAge: 1000 * 60 * 60 * 2, // 2 hours
+            maxAge: 1000 * 60 * 60 * 24, // 24 hours
             sameSite: true,
             secure: IN_PROD
         }
@@ -61,21 +60,46 @@ async function main() {
         }
     };
     
-    async function startSearchJob(topic, userId, summaryStyle) {
-        const broadQuery = topic.main_topic;
-        serverLogger.info(`Performing search for: "${broadQuery}"`);
-        const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(broadQuery)}&hl=de&gl=DE&ceid=DE:de`;
+    async function startSearchJob(userId, summaryStyle) {
+        const userTopic = await db.getTopicByUserId(userId);
+        if (!userTopic || !userTopic.user_intent) {
+            throw new Error("User has not defined their intent yet.");
+        }
+
+        serverLogger.info('Generating smart search queries from user intent...');
+        const searchQueries = await generateSearchQueriesTask({ data: { user_intent: userTopic.user_intent, language: 'de' }});
+        serverLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
+
+        const allArticles = new Map();
+        for (const query of searchQueries) {
+            serverLogger.info(`Performing search for: "${query}"`);
+            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=de&gl=DE&ceid=DE:de`;
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+            try {
+                const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
+                if (!response.ok) {
+                    serverLogger.warn(`Could not load RSS feed for query "${query}". Status: ${response.status}`);
+                    continue;
+                }
+
+                const xml = await response.text();
+                const feed = await parser.parseString(xml);
+                
+                feed.items.slice(0, 10).forEach(article => { // Get top 10 from each query
+                    if (!allArticles.has(article.link)) {
+                        allArticles.set(article.link, article);
+                    }
+                });
+            } catch (err) {
+                 serverLogger.warn(`Failed to fetch or parse feed for query "${query}": ${err.message}`);
+            }
+        }
         
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-        const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
-        if (!response.ok) throw new Error("Could not load RSS feed for search");
-
-        const xml = await response.text();
-        const feed = await parser.parseString(xml);
-        const articlesToCheck = feed.items.slice(0, 20);
-        serverLogger.info(`Found ${articlesToCheck.length} articles.`);
+        const articlesToCheck = Array.from(allArticles.values());
+        serverLogger.info(`Found a total of ${articlesToCheck.length} unique articles.`);
 
         if (articlesToCheck.length === 0) {
             return null;
@@ -89,7 +113,8 @@ async function main() {
             await fetchQueue.add('fetch', {
                 articleId: jobArticle.id,
                 url: jobArticle.link,
-                userId: userId
+                userId: userId,
+                userTopic: userTopic // Pass the whole topic object
             });
         }
 
@@ -155,18 +180,14 @@ async function main() {
         }
     });
 
-    // TOPIC, SEARCH & INTERROGATION ROUTES
+    // --- CORE API ROUTES ---
+
     app.post("/api/rss", isAuthenticated, async (req, res) => {
         serverLogger.info(`/api/rss POST route started for user ${req.session.userId}`);
         const { summaryStyle } = req.body;
 
         try {
-            const userTopic = await db.getTopicByUserId(req.session.userId);
-            if (!userTopic || !userTopic.main_topic) {
-                return res.status(400).json({ error: "No search topic specified. Please set a topic in your personalization settings." });
-            }
-            
-            const jobId = await startSearchJob(userTopic, req.session.userId, summaryStyle);
+            const jobId = await startSearchJob(req.session.userId, summaryStyle);
             if (!jobId) {
                 return res.status(200).json({ jobId: null, message: "No articles found for your topic." });
             }
@@ -178,94 +199,90 @@ async function main() {
         }
     });
     
-    app.post('/api/interrogate', isAuthenticated, async (req, res) => {
-        const userTopic = req.body;
-        if (!userTopic || !userTopic.main_topic) {
-            return res.status(400).json({ error: "A full topic object is required" });
+    app.post('/api/personalization-chat', isAuthenticated, async (req, res) => {
+        const userMessage = req.body.message;
+
+         if (!req.session.chatHistory) {
+            req.session.chatHistory = [];
         }
+
+        if (userMessage) {
+            req.session.chatHistory.push({ role: 'user', parts: [{ text: userMessage }] });
+        }
+        
         try {
-            const result = await interrogateTopicTask({ data: { userTopic, language: req.session.language || 'de' } });
-            res.status(200).json(result);
+            const result = await orchestrateChatTask({ 
+                data: { 
+                    chatHistory: req.session.chatHistory, 
+                    language: req.session.language || 'de' 
+                } 
+            });
+
+            if (result.action === 'reply') {
+                req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
+                res.json({ message: result.message, suggestions: result.suggestions || [] });
+            } else if (result.action === 'save') {
+                await db.upsertTopic(req.session.userId, result.data);
+                req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
+                res.json({ message: result.message, isDone: true });
+                delete req.session.chatHistory; 
+            } else { 
+                res.status(500).json({ message: result.message });
+            }
         } catch (error) {
-            serverLogger.error('Error in /api/interrogate:', error);
-            res.status(500).json({ error: 'Failed to get AI feedback.' });
+            serverLogger.error('Error in personalization chat:', error);
+            res.status(500).json({ message: 'Oh, da ist ein technischer Fehler aufgetreten.' });
         }
     });
 
-    // JOB & TOPIC MANAGEMENT
     app.get("/api/job/:id", isAuthenticated, async (req, res) => {
         const { id } = req.params;
         try {
             const job = await db.getJob(id);
-            if (!job) {
-                return res.status(200).json({ status: 'pending', articles: [] });
-            }
-            if (job.user_id !== req.session.userId) {
-                return res.status(403).json({ error: "Forbidden" });
-            }
-            const allArticles = await db.getJobArticles(id);
-            const completedArticles = allArticles.filter(a => a.status === 'completed');
-            
-            let currentJobStatus = job.status;
-            const hasUnfinishedArticles = allArticles.some(a => a.status === 'pending' || a.status === 'processing');
+            if (!job) return res.status(200).json({ status: 'pending', articles: [] });
+            if (job.user_id !== req.session.userId) return res.status(403).json({ error: "Forbidden" });
 
-            if (!hasUnfinishedArticles && allArticles.length > 0) {
-                currentJobStatus = 'completed';
-                if (job.status === 'processing') {
-                    await db.updateJobStatus(id, 'completed');
+            const allArticles = await db.getJobArticles(id);
+            const isProcessingComplete = !allArticles.some(a => ['pending', 'processing'].includes(a.status));
+
+            // If processing is done, and we haven't generated a summary yet.
+            if (isProcessingComplete && job.status === 'processing') {
+                serverLogger.info(`Job ${id} finished processing articles. Generating meta summary...`);
+                await db.updateJobStatus(id, 'generating_summary');
+                job.status = 'generating_summary';
+
+                const relevantArticles = allArticles.filter(a => a.is_relevant === true);
+                serverLogger.info(`Found ${relevantArticles.length} relevant articles for summary.`);
+
+                let summary = 'No relevant articles found to generate a summary.';
+                if (relevantArticles.length > 0) {
+                    const userTopic = await db.getTopicByUserId(job.user_id);
+                    summary = await generateMetaSummaryTask({
+                        data: {
+                            articles: relevantArticles,
+                            user_intent: userTopic.user_intent,
+                            language: req.session.language || 'de'
+                        }
+                    });
                 }
-            } else if (allArticles.length === 0 && job.status === 'processing') {
-                 currentJobStatus = 'completed';
-                 await db.updateJobStatus(id, 'completed');
+                
+                await db.updateJobMetaSummary(id, summary);
+                await db.updateJobStatus(id, 'completed');
+                job.meta_summary = summary;
+                job.status = 'completed';
             }
-            
-            res.json({ status: currentJobStatus, articles: completedArticles });
+
+            const completedArticles = allArticles.filter(a => a.status === 'completed');
+            res.json({ status: job.status, summary: job.meta_summary, articles: completedArticles });
+
         } catch (err) {
             serverLogger.error(`Error fetching results for job ${id}:`, err);
+            await db.updateJobStatus(id, 'failed').catch(e => serverLogger.error('Failed to update job status on error:', e));
             res.status(500).json({ error: "Error fetching job results" });
         }
     });
 
-    app.get('/api/topics', isAuthenticated, async (req, res) => {
-        try {
-            const topic = await db.getTopicByUserId(req.session.userId);
-            res.json(topic || {});
-        } catch (error) {
-            serverLogger.error('Error fetching topic:', error);
-            res.status(500).json({ error: 'Failed to fetch topic' });
-        }
-    });
-
-    app.post('/api/topics', isAuthenticated, async (req, res) => {
-        const { main_topic, include_keywords, exclude_keywords } = req.body;
-        if (!main_topic) return res.status(400).json({ error: 'Main topic is required' });
-        try {
-            await db.upsertTopic(req.session.userId, { main_topic, include_keywords: include_keywords || '', exclude_keywords: exclude_keywords || '' });
-            res.status(200).json({ message: 'Topic saved successfully' });
-        } catch (error) {
-            serverLogger.error('Error saving topic:', error);
-            res.status(500).json({ error: 'Failed to save topic' });
-        }
-    });
-
-    app.post('/api/clarify-topic', isAuthenticated, async (req, res) => {
-        const { userId, specification } = req.body;
-        if (!userId || !specification) {
-            return res.status(400).json({ error: 'User ID and specification are required' });
-        }
-        if (userId !== req.session.userId) {
-            return res.status(403).json({ error: 'Forbidden' });
-        }
-        try {
-            await db.updateTopicSpecification(userId, specification);
-            res.status(200).json({ message: 'Specification saved successfully' });
-        } catch (error) {
-            serverLogger.error('Error saving specification:', error);
-            res.status(500).json({ error: 'Failed to save specification' });
-        }
-    });
-    
-    // PAGE SERVING & STATIC FILES
+    // --- PAGE SERVING & STATIC FILES ---
     app.get('/', (req, res) => {
         res.set('Cache-Control', 'no-store');
         res.sendFile(path.join(__dirname, 'public', 'saphire.html'));
@@ -273,12 +290,7 @@ async function main() {
 
     app.get('/personalization', (req, res) => {
         res.set('Cache-control', 'no-store');
-        res.sendFile(path.join(__dirname, 'public', 'personalization.html'));
-    });
-
-    app.get('/ai-clarification', (req, res) => {
-        res.set('Cache-control', 'no-store');
-        res.sendFile(path.join(__dirname, 'public', 'ai-clarification.html'));
+        res.sendFile(path.join(__dirname, 'public', 'personalization-chat.html'));
     });
     
     app.use(express.static(path.join(__dirname, 'public')));

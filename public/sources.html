@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quellen</title>
+    <link rel="stylesheet" href="style.css">
+    <style>
+        body {
+            padding: 2rem;
+        }
+        .container {
+            max-width: 900px;
+        }
+        h1 {
+            margin-bottom: 2rem;
+        }
+        .sources-list-numbered {
+            list-style-type: decimal;
+            padding-left: 20px;
+        }
+        .sources-list-numbered li {
+            margin-bottom: 1rem;
+        }
+        .sources-list-numbered a {
+            text-decoration: none;
+            color: #0056b3;
+        }
+        .sources-list-numbered a:hover {
+            text-decoration: underline;
+        }
+        .message-box {
+            margin-top: 1rem;
+            padding: 1rem;
+            border-radius: 5px;
+        }
+        .error-message {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Quellen</h1>
+        <a href="/" style="text-decoration: none; color: #007bff; margin-bottom: 2rem; display: inline-block;">&larr; Zurück zur Zusammenfassung</a>
+        <div id="sources-list-container">
+            <div id="spinner" class="spinner"></div>
+            <div id="sources-message" class="hidden"></div>
+        </div>
+    </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', async () => {
+    const sourcesListContainer = document.getElementById('sources-list-container');
+    const spinner = document.getElementById('spinner');
+    const sourcesMessage = document.getElementById('sources-message');
+
+    function displayMessage(message, type) {
+        sourcesMessage.textContent = message;
+        sourcesMessage.className = 'message-box ' + (type === 'error' ? 'error-message' : 'info-message');
+        sourcesMessage.classList.remove('hidden');
+    }
+
+    try {
+        const urlParams = new URLSearchParams(window.location.search);
+        const jobId = urlParams.get('jobId');
+
+        if (!jobId) {
+            throw new Error('Keine Job-ID in der URL gefunden.');
+        }
+
+        const res = await fetch(`/api/job/${jobId}`);
+        if (!res.ok) {
+            throw new Error('Fehler beim Laden der Job-Daten.');
+        }
+
+        const data = await res.json();
+        const relevantArticles = data.articles.filter(a => a.is_relevant);
+
+        spinner.classList.add('hidden');
+
+        if (relevantArticles.length === 0) {
+            displayMessage('Für diesen Job wurden keine relevanten Quellen gefunden.', 'info');
+            return;
+        }
+
+        const sourcesList = document.createElement('ol');
+        sourcesList.classList.add('sources-list-numbered');
+
+        relevantArticles.forEach(article => {
+            const sourceItem = document.createElement('li');
+            sourceItem.innerHTML = `<a href="${article.link}" target="_blank" rel="noopener noreferrer">${article.title}</a>`;
+            sourcesList.appendChild(sourceItem);
+        });
+        
+        sourcesListContainer.appendChild(sourcesList);
+
+    } catch (error) {
+        spinner.classList.add('hidden');
+        displayMessage(error.message, 'error');
+    }
+});
+</script>
+
+</body>
+</html>
