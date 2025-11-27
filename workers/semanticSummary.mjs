@@ -24,7 +24,7 @@ const worker = new Worker('semantic-summary', async (job) => {
         // 2. Perform the semantic check
         logger.info(`Starting semantic check for: ${article.link} (Lang: ${language})`);
         const semanticCheckResult = await retry(
-            () => semanticCheckTask({ data: { article, userTopic, language } }), 
+            () => semanticCheckTask({ data: { article, userTopic, language, currentDate: new Date().toISOString() } }), 
             2, 
             2000
         );

@@ -163,77 +163,67 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
     }
 };
 
-const generateMetaSummaryTask = async ({ data: { articles, user_intent, language = 'de' } }) => {
+const generateMetaSummaryTask = async ({ data: { articles, user_intent, language = 'de', currentDate } }) => {
     taskLogger.info(`Generating meta summary for ${articles.length} articles.`);
 
-    const articleTexts = articles.map((a, i) => `ARTIKEL ${i + 1} (Titel: ${a.title}):\n${a.content}\n\n`).join('');
+    const articleTexts = articles.map((a, i) => `ARTIKEL ${i + 1} (Veröffentlicht: ${new Date(a.published_at).toLocaleDateString('de-DE')}, Titel: ${a.title}):\n${a.content}\n\n`).join('');
 
     const metaSummaryPrompts = {
-        'de': (intent, content) => `
-            Du bist ein hochkarätiger Analyst, der ein tägliches Briefing für einen gut informierten Kunden erstellt. Dein Ziel ist es, **ausschließlich über neue Entwicklungen und signifikante Ereignisse** zu berichten.
-
-            **Grundregel:** Dein Kunde kennt sein Interessengebiet bereits. Wiederhole keine grundlegenden, statischen Fakten. Konzentriere dich auf das, was HEUTE neu ist.
-
-            **Kundeninteresse:**
-            "${intent}"
-
-            **Relevante Artikel des Tages:**
-            ${content}
-
+        'de': (intent, content, date) => `
+            Du bist ein hochkarätiger, zeitbewusster Analyst, der ein tägliches Briefing für einen gut informierten Kunden erstellt.
+            
+            **Wichtiger Kontext:**
+            - **HEUTE ist der ${date}.** Alle Zeitbezüge wie "heute", "gestern" oder "diese Woche" müssen von diesem Datum aus interpretiert werden.
+            - **Kundeninteresse:** "${intent}"
+            
             **Deine Aufgabe:**
-            Synthetisiere aus den Artikeln eine "Entwicklungs-Zusammenfassung", die sich auf die neuesten und wichtigsten Geschehnisse konzentriert.
+            Erstelle eine "Entwicklungs-Zusammenfassung", die die neuesten und wichtigsten Geschehnisse basierend auf dem Kundeninteresse und der Zeitpräferenz synthetisiert. Deine Zusammenfassung soll nicht nur informieren, sondern eine kohärente Erzählung schaffen, die die aktuellen Entwicklungen in einen verständlichen Kontext setzt.
 
-            **Beispiel zur Verdeutlichung:**
-            - **Kundeninteresse:** "Tech-Aktien"
-            - **FALSCH (zu vermeiden):** "Nvidia ist ein GPU-Hersteller, der sich auf KI konzentriert." (Dies ist bekanntes Grundwissen).
-            - **RICHTIG (erwünscht):** "Nvidia hat heute seine Quartalszahlen vorgelegt und die Erwartungen übertroffen, was zu einem Anstieg des Aktienkurses führte." ODER "Nvidia kündigte die Veröffentlichung eines neuen KI-Chips, des H200, an."
+            **Grundregeln der Analyse:**
+            1.  **Zeitliche Relevanz verstehen:** Interpretiere die Absicht des Nutzers auch im Hinblick auf die Zeit. Ein Nutzer, der nach "Bundestagswahl" fragt, will HEUTE über aktuelle Debatten informiert werden, nicht über die Ergebnisse der letzten Wahl, es sei denn, diese sind für einen aktuellen Kontext relevant.
+            2.  **Fokus auf NEUE Entwicklungen:** Dein Kunde kennt sein Interessengebiet. Wiederhole keine statischen Fakten. Konzentriere dich auf das, was sich gerade entwickelt. Ältere Artikel können als Kontext dienen, um aktuelle Ereignisse zu erklären, aber die Zusammenfassung muss die neuesten Informationen priorisieren.
+            3.  **Synthese statt Auflistung:** Baue eine kohärente Erzählung. Verbinde Informationen aus verschiedenen Artikeln, um ein vollständiges Bild der aktuellen Lage zu zeichnen. Zeige auf, wie ältere Ereignisse die heutigen Entwicklungen beeinflussen. Ein Beispiel: "Aufbauend auf der Entscheidung von letzter Woche, die Zinsen unverändert zu lassen, hat die Zentralbank nun signalisiert, dass zukünftige Schritte von den Inflationsdaten abhängen werden."
+            4. **Personalisierung und Lernen:** Berücksichtige, dass dies eine fortlaufende Konversation ist. Die Zusammenfassungen werden von Tag zu Tag aufgebaut. Wenn ein Thema gestern bereits behandelt wurde, gib heute ein Update, anstatt das Thema neu einzuführen.
 
-            **Anweisungen für das Briefing:**
-            1.  **Fokus auf Neuigkeiten:** Identifiziere die Kernaussagen der Artikel, die auf neue Ereignisse, Ankündigungen, Zahlen, oder bedeutende Veränderungen hinweisen.
-            2.  **Struktur:**
-                *   Beginne mit einer prägnanten, übergeordneten Überschrift, die die Top-Entwicklung des Tages zusammenfasst.
-                *   Verfasse eine sehr kurze Einleitung (1-2 Sätze), die die wichtigsten neuen Erkenntnisse hervorhebt.
-                *   Gliedere den Hauptteil nach den wichtigsten neuen Themen oder Ereignissen. Gib jedem Abschnitt eine klare Überschrift.
-            3.  **Synthese:** Fasse die neuen Informationen zusammen und stelle Zusammenhänge her. Liste nicht nur Fakten aus den Artikeln auf, sondern baue eine Erzählung darüber, was passiert ist.
-            4.  **Tonfall:** Professionell, auf den Punkt gebracht und analytisch.
-            5.  **Formatierung:** Sauberes Markdown. '#' für die Hauptüberschrift, '##' für die Abschnitte.
+            **Struktur des Briefings:**
+            1.  **Hauptüberschrift:** Eine prägnante Schlagzeile, die die Top-Entwicklung des Tages zusammenfasst.
+            2.  **Einleitung (1-2 Sätze):** Die wichtigsten neuen Erkenntnisse auf den Punkt gebracht.
+            3.  **Hauptteil:** Gliedere nach den wichtigsten *neuen* Themen. Jeder Abschnitt bekommt eine klare Überschrift. Nutze ältere Informationen, um Kontext zu geben (z.B. "Aufbauend auf der Entscheidung von letzter Woche, hat die Regierung nun...").
+
+            **Relevante Artikel (sortiert von neu nach alt):**
+            ${content}
 
             Erstelle jetzt das Entwicklungs-Briefing für den Kunden.
         `,
-        'en': (intent, content) => `
-            You are a top-tier analyst creating a daily briefing for a well-informed client. Your goal is to report **exclusively on new developments and significant events**.
+        'en': (intent, content, date) => `
+            You are a top-tier, time-aware analyst creating a daily briefing for a well-informed client.
 
-            **Ground Rule:** Your client already knows their area of interest. Do not repeat basic, static facts. Focus on what is NEW today.
-
-            **Client's Intent:**
-            "${intent}"
-
-            **Relevant Articles for the Day:**
-            ${content}
+            **Critical Context:**
+            - **TODAY is ${date}.** All temporal references like "today," "yesterday," or "this week" must be interpreted from this date.
+            - **Client's Intent:** "${intent}"
 
             **Your Task:**
-            Synthesize a "Development Summary" from the articles, focusing on the latest and most important happenings.
+            Create a "Development Summary" that synthesizes the latest and most important happenings based on the client's interest and time preference. Your summary should not just inform, but create a coherent narrative that places current developments in an understandable context.
 
-            **Clarifying Example:**
-            - **Client's Intent:** "Tech Stocks"
-            - **WRONG (to avoid):** "Nvidia is a GPU manufacturer that focuses on AI." (This is known, basic information).
-            - **RIGHT (desired):** "Nvidia reported its quarterly earnings today, exceeding expectations and leading to a rise in its stock price." OR "Nvidia announced the release of a new AI chip, the H200."
+            **Core Principles of Analysis:**
+            1.  **Understand Temporal Relevance:** Interpret the user's intent with time in mind. A user asking about "election results" TODAY wants to know about current debates, not the outcome of the last election, unless it's relevant context for a current event.
+            2.  **Focus on NEW Developments:** Your client knows their field. Don't repeat static facts. Concentrate on what is evolving. Older articles can serve as context to explain current events, but the summary must prioritize the latest information.
+            3.  **Synthesize, Don't List:** Build a coherent narrative. Connect information from different articles to paint a complete picture of the current situation. Show how past events influence today's developments. For example: "Building on last week's decision to leave interest rates unchanged, the central bank has now signaled that future moves will depend on inflation data."
+            4. **Personalization and Learning:** Keep in mind that this is an ongoing conversation. Summaries will be built up from day to day. If a topic was already covered yesterday, provide an update today instead of re-introducing the topic.
 
-            **Briefing Instructions:**
-            1.  **Focus on News:** Identify the key statements in the articles that point to new events, announcements, figures, or significant changes.
-            2.  **Structure:**
-                *   Start with a concise, high-level headline that summarizes the top development of the day.
-                *   Write a very brief introduction (1-2 sentences) highlighting the most important new findings.
-                *   Structure the main body by the most important new topics or events. Give each section a clear headline.
-            3.  **Synthesis:** Summarize the new information and create connections. Don't just list facts from the articles; build a narrative about what happened.
-            4.  **Tone:** Professional, to-the-point, and analytical.
-            5.  **Formatting:** Clean Markdown. '#' for the main headline, '##' for sections.
+            **Briefing Structure:**
+            1.  **Main Headline:** A concise headline summarizing the top development of the day.
+            2.  **Introduction (1-2 sentences):** The most critical new findings, straight to the point.
+            3.  **Body:** Structure by the most important *new* topics. Each section gets a clear headline. Use older information to provide context (e.g., "Building on last week's decision, the government has now...").
+            
+            **Relevant Articles (sorted from new to old):**
+            ${content}
 
             Now, create the development briefing for the client.
         `
     };
 
-    const prompt = (metaSummaryPrompts[language] || metaSummaryPrompts['de'])(user_intent, articleTexts);
+    const prompt = (metaSummaryPrompts[language] || metaSummaryPrompts['de'])(user_intent, articleTexts, currentDate);
 
     try {
         const summary = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
@@ -245,55 +235,59 @@ const generateMetaSummaryTask = async ({ data: { articles, user_intent, language
     }
 };
 
-const semanticCheckTask = async ({ data: { article, userTopic, language = 'de' } }) => {
+const semanticCheckTask = async ({ data: { article, userTopic, language = 'de', currentDate } }) => {
     taskLogger.info(`Performing semantic check for article "${article.title}" against topic "${userTopic}"`);
 
     const semanticCheckPrompts = {
-        'de': (topic, articleTitle, articleContent) => `
-            Du bist ein intelligenter und kontextbewusster Nachrichtenkurator. Deine Aufgabe ist es, zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse relevant ist. Es geht nicht um einen reinen Keyword-Abgleich, sondern um das Verständnis der Absicht des Nutzers.
-
-            **Nutzerinteresse:**
-            "${topic}"
+        'de': (topic, articleTitle, articleContent, date, article) => `
+            Du bist ein intelligenter und zeitbewusster Nachrichtenkurator. Deine Aufgabe ist es, zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse und dem aktuellen Datum relevant ist.
+            
+            **Wichtiger Kontext:**
+            - **HEUTE ist der ${date}.** Zeitbezüge wie "kürzlich" oder "diese Woche" müssen von diesem Datum aus bewertet werden.
+            - **Nutzerinteresse:** "${topic}"
 
             **Artikel:**
             - **Titel:** "${articleTitle}"
+            - **Veröffentlicht am:** "${new Date(article.published_at).toLocaleDateString('de-DE')}"
             - **Inhalt (Auszug):** "${articleContent.substring(0, 2500)}..."
 
             **Deine Aufgabe:**
-            1.  Verstehe die Kernabsicht und den Kontext des Nutzerinteresses. Was will der Nutzer wirklich erfahren?
-            2.  Beurteile, ob der Artikel einen wertvollen Beitrag zum Interesse des Nutzers leistet. Das bedeutet, er muss nicht exakt das Thema treffen, aber er sollte für jemanden, der sich für dieses Thema interessiert, von Bedeutung sein.
-            3.  **Wichtig:** Artikel, die den weiteren Kontext, Debatten oder kritische Auseinandersetzungen zu einem Thema beleuchten, sind relevant.
-                *   **Beispiel:** Wenn das Nutzerinteresse "neue EU-Gesetzesvorschläge von Ursula von der Leyen" ist, dann ist ein Artikel mit dem Titel "Kritik an geplanter Chatkontrolle wächst" relevant, weil er die Debatte um einen solchen Vorschlag widerspiegelt.
-            4.  Schließe nur Artikel aus, die offensichtlich irrelevant sind oder das Thema nur am Rande erwähnen.
-            5.  Gib eine kurze, klare Begründung für deine Entscheidung (1-2 Sätze).
+            1.  **Zeitliche Relevanz prüfen:** Beurteile die Relevanz des Artikels im Kontext des HEUTIGEN Datums. Ein alter Artikel kann kontextuell wertvoll sein, aber ist er für eine HEUTIGE Nachrichtenzusammenfassung noch relevant?
+                *   **Beispiel für Zeitpräferenz:** Wenn das Nutzerinteresse "Bundestagswahl" ist und heute der 27. November 2025 ist, ist ein Artikel über eine Wahl im April 2025 wahrscheinlich veraltet, es sei denn, er liefert entscheidenden Kontext für ein aktuelles Ereignis.
+            2.  **Inhaltliche Relevanz prüfen:** Verstehe die Kernabsicht des Nutzerinteresses. Leistet der Artikel einen wertvollen Beitrag, indem er den weiteren Kontext, Debatten oder kritische Auseinandersetzungen beleuchtet?
+                *   **Beispiel für Kontext:** Wenn das Nutzerinteresse "neue EU-Gesetzesvorschläge von Ursula von der Leyen" ist, dann ist ein Artikel mit dem Titel "Kritik an geplanter Chatkontrolle wächst" relevant.
+            3.  **Entscheidung:** Schließe nur Artikel aus, die sowohl zeitlich als auch inhaltlich offensichtlich irrelevant sind oder das Thema nur am Rande erwähnen.
+            4.  **Begründung:** Gib eine kurze, klare Begründung für deine Entscheidung (1-2 Sätze).
 
             **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
             \`{ "is_relevant": <true oder false>, "reason": "<deine Begründung>" }\`
         `,
-        'en': (topic, articleTitle, articleContent) => `
-            You are an intelligent and context-aware news curator. Your task is to judge whether an article is relevant to a user based on their interest. This is not about pure keyword matching, but about understanding the user's intent.
+        'en': (topic, articleTitle, articleContent, date, article) => `
+            You are an intelligent and time-aware news curator. Your task is to judge whether an article is relevant to a user based on their interest and the current date.
 
-            **User Interest:**
-            "${topic}"
+            **Critical Context:**
+            - **TODAY is ${date}.** References like "recently" or "this week" must be evaluated from this date.
+            - **User Interest:** "${topic}"
 
             **Article:**
             - **Title:** "${articleTitle}"
+            - **Published on:** "${new Date(article.published_at).toLocaleDateString('en-US')}"
             - **Content (Excerpt):** "${articleContent.substring(0, 2500)}..."
 
             **Your Task:**
-            1.  Understand the core intent and context of the user's interest. What does the user really want to know?
-            2.  Judge whether the article makes a valuable contribution to the user's interest. This means it doesn't have to match the topic exactly, but it should be significant for someone interested in that topic.
-            3.  **Important:** Articles that shed light on the broader context, debates, or critical discussions on a topic are relevant.
-                *   **Example:** If the user's interest is "new EU legislative proposals from Ursula von der Leyen," then an article titled "Criticism of planned 'chat control' is growing" is relevant because it reflects the debate surrounding such a proposal.
-            4.  Only exclude articles that are obviously irrelevant or only mention the topic in passing.
-            5.  Provide a short, clear reason for your decision (1-2 sentences).
+            1.  **Check Temporal Relevance:** Assess the article's relevance in the context of TODAY's date. An old article might be contextually valuable, but is it still relevant for a news summary TODAY?
+                *   **Example of Time Preference:** If the user interest is "German federal election" and today is November 27, 2025, an article about an election in April 2025 is likely outdated, unless it provides crucial context for a current event.
+            2.  **Check Content Relevance:** Understand the core intent of the user's interest. Does the article make a valuable contribution by highlighting broader context, debates, or critical discussions?
+                *   **Example of Context:** If the user's interest is "new EU legislative proposals from Ursula von der Leyen," an article titled "Criticism of planned 'chat control' is growing" is relevant.
+            3.  **Decision:** Only exclude articles that are obviously irrelevant both temporally and in content, or only mention the topic in passing.
+            4.  **Reasoning:** Provide a short, clear reason for your decision (1-2 sentences).
 
             **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
             \`{ "is_relevant": <true or false>, "reason": "<your reason>" }\`
         `
     };
 
-    const prompt = (semanticCheckPrompts[language] || semanticCheckPrompts['de'])(userTopic, article.title, article.content);
+    const prompt = (semanticCheckPrompts[language] || semanticCheckPrompts['de'])(userTopic, article.title, article.content, currentDate, article);
 
     try {
         const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.2);

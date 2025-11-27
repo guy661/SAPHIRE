@@ -349,7 +349,8 @@ async function main() {
                         data: {
                             articles: relevantArticles,
                             user_intent: dashboard.user_intent,
-                            language: user.language || 'de'
+                            language: user.language || 'de',
+                            currentDate: new Date().toLocaleDateString('de-DE')
                         }
                     });
                 }
