@@ -2,6 +2,65 @@ const { retry, callGemini, callGeminiChat, Logger, EMOJIS } = require('./utils.j
 
 const taskLogger = new Logger('Task', 'yellow', EMOJIS.task);
 
+const headlineCheckTask = async ({ data: { articleTitle, userTopic, language = 'de' } }) => {
+    taskLogger.info(`Performing headline check for title "${articleTitle}" against topic "${userTopic.substring(0, 80)}"...`);
+
+    const headlineCheckPrompts = {
+        'de': (topic, title) => `
+            Du bist ein extrem schneller Nachrichten-Vorsortierer. Deine einzige Aufgabe ist es, anhand des Titels zu entscheiden, ob ein Artikel möglicherweise für das folgende Nutzerinteresse relevant ist. Sei dabei sehr großzügig; schließe nur Artikel aus, deren Titel GANZ KLAR nichts mit dem Thema zu tun hat.
+
+            **Nutzerinteresse:** "${topic}"
+            **Artikeltitel:** "${title}"
+
+            **Deine Aufgabe:**
+            Antworte mit "ja", wenn der Titel auch nur die geringste Chance hat, relevant zu sein.
+            Antworte mit "nein", wenn der Titel offensichtlich und ohne Zweifel irrelevant ist.
+
+            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
+            { "is_headline_relevant": <true oder false> }
+        `,
+        'en': (topic, title) => `
+            You are an extremely fast news pre-sorter. Your only job is to decide from the title alone if an article could possibly be relevant to the following user interest. Be very generous; only exclude articles where the title is OBVIOUSLY unrelated to the topic.
+
+            **User Interest:** "${topic}"
+            **Article Title:** "${title}"
+
+            **Your Task:**
+            Respond with "yes" if the title has even the slightest chance of being relevant.
+            Respond with "no" if the title is obviously and without a doubt irrelevant.
+            
+            **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
+            { "is_headline_relevant": <true oder false> }
+        `
+    };
+
+    const prompt = (headlineCheckPrompts[language] || headlineCheckPrompts['de'])(userTopic, articleTitle);
+
+    try {
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.1);
+        taskLogger.debug(`Raw AI headline check response: ${responseString}`);
+
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) {
+            taskLogger.warn(`No JSON object found in AI response for headline check. Defaulting to relevant.`);
+            return { is_headline_relevant: true };
+        }
+        
+        const result = JSON.parse(jsonMatch[0]);
+        if (typeof result.is_headline_relevant !== 'boolean') {
+            throw new Error('Invalid JSON structure in AI response for headline check.');
+        }
+
+        taskLogger.info(`Headline check for title "${articleTitle}" complete. Potentially relevant: ${result.is_headline_relevant}`);
+        return result;
+
+    } catch (error) {
+        taskLogger.error(`Error during headline check for title "${articleTitle}"`, error);
+        // In case of error, default to relevant to avoid accidentally filtering out good content.
+        return { is_headline_relevant: true };
+    }
+};
+
 const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) => {
     taskLogger.info(`Orchestrating chat with history length: ${chatHistory.length}`);
 
@@ -35,7 +94,7 @@ const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) =
         - Sei proaktiv. Beginne locker und frage nach allgemeinen Interessen.
         - Wenn ein Thema breit ist, gib nicht auf, bis du den spezifischen Blickwinkel oder die Perspektive des Nutzers verstanden hast. Stelle klärende Fragen und mache Vorschläge, um das Thema einzugrenzen.
         - Triff eine eigene Einschätzung (eine "Prognose"), ob das Thema spezifisch genug ist. Du musst den Nutzer nicht immer explizit fragen, ob es "spezifisch genug" ist. Führe das Gespräch so, dass du die Antwort bekommst.
-        - Am Ende des Gesprächs, wenn du glaubst, die Absicht vollständig erfasst zu haben, fasse sie in einem Paragraphen zusammen und frage den Nutzer explizit um Bestätigung.
+        - Am Ende des Gesprächs, wenn du glaubst, die Absicht vollständig erfasst zu haben, fasse sie in einem Paragraphen zusammen und frage den Nutzer explizit um Bestätigung. 
         
         TOOL-NUTZUNG:
         - Rufe die Funktion 'save_intent' ERST DANN auf, wenn du die finale, zusammengefasste 'user_intent' formuliert hast UND der Nutzer diese Zusammenfassung bestätigt hat (z.B. mit "Ja, das passt so").
@@ -48,7 +107,7 @@ const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) =
         - Be proactive. Start casually and ask for general interests.
         - If a topic is broad, don't give up until you understand the user's specific angle or perspective. Ask clarifying questions and make suggestions to narrow it down.
         - Make your own judgment (a "prognosis") about whether the topic is specific enough. You don't always have to explicitly ask the user if it's "specific enough." Guide the conversation to get the answer.
-        - At the end of the conversation, when you believe you have fully captured the intent, summarize it in a paragraph and explicitly ask the user for confirmation.
+        - At the end of the conversation, when you believe you have fully captured the intent, summarize it in a paragraph and explicitly ask the user for confirmation. 
         
         TOOL USAGE:
         - Call the 'save_intent' function ONLY after you have formulated the final, summarized 'user_intent' AND the user has confirmed that summary (e.g., with "Yes, that looks good").
@@ -109,16 +168,17 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
             **Deine Aufgabe:**
             1.  Analysiere die Kernkonzepte der Nutzerintention.
             2.  Erstelle 3 bis 5 **unterschiedliche Suchanfragen** (Strings).
-            3.  Die Anfragen sollten eine Mischung aus breiteren und spezifischeren Begriffen sein, um die Wahrscheinlichkeit zu maximieren, relevante Artikel zu finden. Kombiniere Keywords auf sinnvolle Weise.
-            4.  Die Anfragen sollten auf Deutsch sein.
+            3.  **WICHTIGE REGEL: Jede Anfrage darf aus maximal ZWEI Wörtern bestehen.**
+            4.  Die Anfragen sollten eine Mischung aus breiteren und spezifischeren Begriffen sein, um die Wahrscheinlichkeit zu maximieren, relevante Artikel zu finden.
+            5.  Die Anfragen sollten auf Deutsch sein.
 
             **Beispiel:**
             - **Nutzerintention:** "Ich interessiere mich für den Einsatz von KI bei der Früherkennung von Lungenkrebs, insbesondere durch die Bildanalyse von CT-Scans."
-            - **Gute Suchanfragen:** ["KI Lungenkrebs Früherkennung", "CT-Scan Bildanalyse maschinelles Lernen", "Deep Learning medizinische Bildgebung Krebsdiagnose", "Künstliche Intelligenz Computertomographie Onkologie"]
+            - **Gute Suchanfragen:** ["KI Lungenkrebs", "CT-Scan Bildanalyse", "Deep Learning Krebsdiagnose", "KI Onkologie"]
 
             **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT:**
             - Das Objekt muss einen einzigen Schlüssel "queries" enthalten, der ein Array von Strings ist.
-            - Beispiel-Format: \`{ "queries": ["Anfrage 1", "Anfrage 2", "Anfrage 3"] }\`
+            - Beispiel-Format: { "queries": ["Anfrage 1", "Anfrage 2", "Anfrage 3"] }
         `,
         'en': (intent) => `
             You are an expert in search engine strategy. Your task is to generate the best possible search queries for a given user intent, targeting a **non-semantic, keyword-based** search engine like Google News.
@@ -138,7 +198,7 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
 
             **RESPOND ONLY WITH A VALID JSON OBJECT:**
             - The object must contain a single key "queries" which holds an array of strings.
-            - Example Format: \`{ "queries": ["Query 1", "Query 2", "Query 3"] }\`
+            - Example Format: { "queries": ["Query 1", "Query 2", "Query 3"] }
         `
     };
 
@@ -236,54 +296,48 @@ const generateMetaSummaryTask = async ({ data: { articles, user_intent, language
 };
 
 const semanticCheckTask = async ({ data: { article, userTopic, language = 'de', currentDate } }) => {
-    taskLogger.info(`Performing semantic check for article "${article.title}" against topic "${userTopic}"`);
+    taskLogger.info(`Performing semantic check for article "${article.title}" against topic "${userTopic.substring(0, 80)}"...`);
 
     const semanticCheckPrompts = {
         'de': (topic, articleTitle, articleContent, date, article) => `
-            Du bist ein intelligenter und zeitbewusster Nachrichtenkurator. Deine Aufgabe ist es, zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse und dem aktuellen Datum relevant ist.
+            Du bist ein intelligenter Nachrichtenkurator. Deine Aufgabe ist es, mit Augenmaß zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse relevant ist.
             
-            **Wichtiger Kontext:**
-            - **HEUTE ist der ${date}.** Zeitbezüge wie "kürzlich" oder "diese Woche" müssen von diesem Datum aus bewertet werden.
-            - **Nutzerinteresse:** "${topic}"
+            **Nutzerinteresse:** "${topic}"
 
             **Artikel:**
             - **Titel:** "${articleTitle}"
             - **Veröffentlicht am:** "${new Date(article.published_at).toLocaleDateString('de-DE')}"
-            - **Inhalt (Auszug):** "${articleContent.substring(0, 2500)}..."
+            - **Inhalt (Auszug):** "${articleContent.substring(0, 3000)}..."
 
             **Deine Aufgabe:**
-            1.  **Zeitliche Relevanz prüfen:** Beurteile die Relevanz des Artikels im Kontext des HEUTIGEN Datums. Ein alter Artikel kann kontextuell wertvoll sein, aber ist er für eine HEUTIGE Nachrichtenzusammenfassung noch relevant?
-                *   **Beispiel für Zeitpräferenz:** Wenn das Nutzerinteresse "Bundestagswahl" ist und heute der 27. November 2025 ist, ist ein Artikel über eine Wahl im April 2025 wahrscheinlich veraltet, es sei denn, er liefert entscheidenden Kontext für ein aktuelles Ereignis.
-            2.  **Inhaltliche Relevanz prüfen:** Verstehe die Kernabsicht des Nutzerinteresses. Leistet der Artikel einen wertvollen Beitrag, indem er den weiteren Kontext, Debatten oder kritische Auseinandersetzungen beleuchtet?
-                *   **Beispiel für Kontext:** Wenn das Nutzerinteresse "neue EU-Gesetzesvorschläge von Ursula von der Leyen" ist, dann ist ein Artikel mit dem Titel "Kritik an geplanter Chatkontrolle wächst" relevant.
-            3.  **Entscheidung:** Schließe nur Artikel aus, die sowohl zeitlich als auch inhaltlich offensichtlich irrelevant sind oder das Thema nur am Rande erwähnen.
+            1.  **Kernrelevanz prüfen:** Verstehe die Kernabsicht des Nutzerinteresses. Leistet der Artikel einen wertvollen Beitrag zum Thema? Beleuchtet er Hintergründe, Debatten oder wichtige Zusammenhänge?
+            2.  **Kontext über Aktualität:** Ein Artikel muss nicht brandaktuell sein, um relevant zu sein. Ältere Artikel, die grundlegendes Wissen oder wichtigen, schwer zu findenden Kontext für aktuelle oder wiederkehrende Themen liefern, sind SEHR WERTVOLL.
+                *   **Beispiel:** Wenn das Interesse "Spannungen im Südchinesischen Meer" ist, ist ein detaillierter Analyse-Artikel von vor 6 Monaten, der die historischen Ansprüche erklärt, wahrscheinlich relevant.
+            3.  **FINALE ENTSCHEIDUNG:** Sei großzügig. Schließe einen Artikel NUR DANN aus, wenn er ZWEIFELSFREI und OFFENSICHTLICH irrelevant ist (z.B. völlig anderes Thema, eine reine Randnotiz, oder ein Event-Bericht, der durch neuere Ereignisse komplett überholt ist). Im Zweifel gilt der Artikel als relevant.
             4.  **Begründung:** Gib eine kurze, klare Begründung für deine Entscheidung (1-2 Sätze).
 
             **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
-            \`{ "is_relevant": <true oder false>, "reason": "<deine Begründung>" }\`
+            { "is_relevant": <true oder false>, "reason": "<deine Begründung>" }
         `,
         'en': (topic, articleTitle, articleContent, date, article) => `
-            You are an intelligent and time-aware news curator. Your task is to judge whether an article is relevant to a user based on their interest and the current date.
+            You are an intelligent news curator. Your task is to judge with good judgment whether an article is relevant to a user based on their interest.
 
-            **Critical Context:**
-            - **TODAY is ${date}.** References like "recently" or "this week" must be evaluated from this date.
-            - **User Interest:** "${topic}"
+            **User Interest:** "${topic}"
 
             **Article:**
             - **Title:** "${articleTitle}"
             - **Published on:** "${new Date(article.published_at).toLocaleDateString('en-US')}"
-            - **Content (Excerpt):** "${articleContent.substring(0, 2500)}..."
+            - **Content (Excerpt):** "${articleContent.substring(0, 3000)}..."
 
             **Your Task:**
-            1.  **Check Temporal Relevance:** Assess the article's relevance in the context of TODAY's date. An old article might be contextually valuable, but is it still relevant for a news summary TODAY?
-                *   **Example of Time Preference:** If the user interest is "German federal election" and today is November 27, 2025, an article about an election in April 2025 is likely outdated, unless it provides crucial context for a current event.
-            2.  **Check Content Relevance:** Understand the core intent of the user's interest. Does the article make a valuable contribution by highlighting broader context, debates, or critical discussions?
-                *   **Example of Context:** If the user's interest is "new EU legislative proposals from Ursula von der Leyen," an article titled "Criticism of planned 'chat control' is growing" is relevant.
-            3.  **Decision:** Only exclude articles that are obviously irrelevant both temporally and in content, or only mention the topic in passing.
+            1.  **Check Core Relevance:** Understand the core intent of the user's interest. Does the article make a valuable contribution to the topic? Does it illuminate background, debates, or important context?
+            2.  **Context Over Recency:** An article does not have to be brand new to be relevant. Older articles that provide foundational knowledge or important, hard-to-find context for current or recurring topics are VERY VALUABLE.
+                *   **Example:** If the interest is "tensions in the South China Sea," a detailed analysis article from 6 months ago explaining the historical claims is likely relevant.
+            3.  **FINAL DECISION:** Be generous. Exclude an article ONLY IF it is UNDOUBTEDLY and OBVIOUSLY irrelevant (e.g., a completely different topic, a mere side note, or an event report that is completely superseded by newer events). When in doubt, the article is considered relevant.
             4.  **Reasoning:** Provide a short, clear reason for your decision (1-2 sentences).
 
             **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
-            \`{ "is_relevant": <true or false>, "reason": "<your reason>" }\`
+            { "is_relevant": <true oder false>, "reason": "<your reason>" }
         `
     };
 
@@ -311,4 +365,4 @@ const semanticCheckTask = async ({ data: { article, userTopic, language = 'de', 
     }
 };
 
-module.exports = { semanticCheckTask, orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask };
+module.exports = { headlineCheckTask, semanticCheckTask, orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask };

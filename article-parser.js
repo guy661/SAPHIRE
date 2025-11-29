@@ -30,7 +30,7 @@ const PAYWALL_INDICATORS = {
 // Posted by GTK
 // Retrieved 2025-11-24, License - CC BY-SA 4.0
 async function getArticleUrl(googleRssUrl) {
-    parserLogger.info(`Resolving Google News URL: ${googleRssUrl}`);
+    parserLogger.info(`Resolving Google News URL: ${googleRssUrl.substring(0, 100)}...`);
     const response = await axios.get(googleRssUrl, { timeout: 10000 });
     const $ = cheerio.load(response.data);
     const data = $('c-wiz[data-p]').attr('data-p');

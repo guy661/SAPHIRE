@@ -2,7 +2,8 @@
 import { Worker } from 'bullmq';
 import redisConnection from '../redis.mjs';
 import * as db from '../database-postgres.js';
-import { semanticCheckTask } from '../task.js';
+import pkg from '../task.js';
+const { semanticCheckTask } = pkg;
 import { retry, Logger, EMOJIS } from '../utils.js';
 
 const logger = new Logger('Semantic Worker', 'magenta', EMOJIS.semantic);
@@ -47,7 +48,7 @@ const worker = new Worker('semantic-summary', async (job) => {
     }
 }, { 
     connection: redisConnection,
-    concurrency: 4 // As requested by the user
+    concurrency: 2
 });
 
 worker.on('completed', (job, result) => {

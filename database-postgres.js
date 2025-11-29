@@ -26,6 +26,7 @@ async function init() {
                 name VARCHAR(255) NOT NULL,
                 user_intent TEXT,
                 interval_minutes INTEGER,
+                is_active BOOLEAN NOT NULL DEFAULT false,
                 summary_style VARCHAR(255),
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -119,10 +120,20 @@ async function updateDashboardTopic(dashboardId, userIntent) {
     return res.rows[0];
 }
 
-async function updateDashboardSettings(dashboardId, { name, interval_minutes, summary_style }) {
+async function updateDashboardSettings(dashboardId, { name, interval_minutes, summary_style, is_active }) {
+    // Fetch current values first to prevent them from being overwritten with null
+    const current = await getDashboardById(dashboardId);
+    
+    const newSettings = {
+        name: name !== undefined ? name : current.name,
+        interval_minutes: interval_minutes !== undefined ? interval_minutes : current.interval_minutes,
+        summary_style: summary_style !== undefined ? summary_style : current.summary_style,
+        is_active: is_active !== undefined ? is_active : current.is_active,
+    };
+
     const res = await pool.query(
-        'UPDATE dashboards SET name = $1, interval_minutes = $2, summary_style = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *',
-        [name, interval_minutes, summary_style, dashboardId]
+        'UPDATE dashboards SET name = $1, interval_minutes = $2, summary_style = $3, is_active = $4, updated_at = CURRENT_TIMESTAMP WHERE id = $5 RETURNING *',
+        [newSettings.name, newSettings.interval_minutes, newSettings.summary_style, newSettings.is_active, dashboardId]
     );
     return res.rows[0];
 }
@@ -276,6 +287,22 @@ async function runMigrations() {
             dbLogger.info('"jobs" table schema is up to date.');
         }
 
+        // Migration 3: Add is_active to dashboards if it doesn't exist
+        const dashboardColumnRes = await client.query(`
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name='dashboards' AND column_name='is_active'
+        `);
+
+        if (dashboardColumnRes.rows.length === 0) {
+            dbLogger.warn('Old schema detected in "dashboards" table (is_active column missing). Running migration...');
+            await client.query('ALTER TABLE dashboards ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT false');
+            await client.query('UPDATE dashboards SET is_active = false');
+            dbLogger.info('Migration successful: "is_active" column added and updated on "dashboards" table.');
+        } else {
+            dbLogger.info('"dashboards" table schema is up to date.');
+        }
+
         await client.query('COMMIT');
         dbLogger.info('Database migrations checked successfully.');
 
@@ -286,6 +313,31 @@ async function runMigrations() {
     } finally {
         client.release();
     }
+}
+
+async function getLatestCompletedJobForDashboard(dashboardId) {
+    const res = await pool.query(
+        `SELECT * FROM jobs 
+         WHERE dashboard_id = $1 AND status = 'completed' 
+         ORDER BY created_at DESC 
+         LIMIT 1`,
+        [dashboardId]
+    );
+    return res.rows[0];
+}
+
+async function getActiveJobForDashboard(dashboardId) {
+    const res = await pool.query(
+        `SELECT * FROM jobs 
+         WHERE dashboard_id = $1 AND status IN ('processing', 'generating_summary', 'pending')`,
+        [dashboardId]
+    );
+    return res.rows[0];
+}
+
+async function getAllDashboardsWithInterval() {
+    const res = await pool.query('SELECT * FROM dashboards WHERE interval_minutes IS NOT NULL AND interval_minutes > 0 AND is_active = true');
+    return res.rows;
 }
 
 init().then(runMigrations).catch(err => {
@@ -302,12 +354,15 @@ module.exports = {
     createDashboard,
     getDashboardById,
     getDashboardsByUserId,
+    getAllDashboardsWithInterval,
     updateDashboardTopic,
     updateDashboardSettings,
     deleteDashboard,
     // Job functions
     createJob,
     getJob,
+    getActiveJobForDashboard,
+    getLatestCompletedJobForDashboard,
     createJobArticle,
     getJobArticles,
     getArticle,

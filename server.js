@@ -60,72 +60,8 @@ async function main() {
         }
     };
     
-    async function startSearchJob(dashboardId, userId) {
-        const dashboard = await db.getDashboardById(dashboardId);
-        if (!dashboard || dashboard.user_id !== userId) {
-            throw new Error("Dashboard not found or access denied.");
-        }
-        if (!dashboard.user_intent) {
-            throw new Error("Dashboard has no user intent defined yet.");
-        }
-
-        serverLogger.info(`Starting search job for dashboard ${dashboardId}: "${dashboard.name}"`);
-        const user = await db.getUserById(userId);
-
-        serverLogger.info('Generating smart search queries from user intent...');
-        const searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' }});
-        serverLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
-
-        const allArticles = new Map();
-        for (const query of searchQueries) {
-            serverLogger.info(`Performing search for: "${query}"`);
-            const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${user.language}&gl=DE&ceid=DE:${user.language}`;
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-            try {
-                const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
-                if (!response.ok) {
-                    serverLogger.warn(`Could not load RSS feed for query "${query}". Status: ${response.status}`);
-                    continue;
-                }
-
-                const xml = await response.text();
-                const feed = await parser.parseString(xml);
-                
-                feed.items.slice(0, 10).forEach(article => { // Get top 10 from each query
-                    if (!allArticles.has(article.link)) {
-                        allArticles.set(article.link, article);
-                    }
-                });
-            } catch (err) {
-                 serverLogger.warn(`Failed to fetch or parse feed for query "${query}": ${err.message}`);
-            }
-        }
-        
-        const articlesToCheck = Array.from(allArticles.values());
-        serverLogger.info(`Found a total of ${articlesToCheck.length} unique articles.`);
-
-        if (articlesToCheck.length === 0) {
-            return null;
-        }
-
-        const jobId = randomUUID();
-        await db.createJob(jobId, dashboardId, 'processing');
-
-        for (const article of articlesToCheck) {
-            const jobArticle = await db.createJobArticle(jobId, article);
-            await fetchQueue.add('fetch', {
-                articleId: jobArticle.id,
-                url: jobArticle.link,
-                dashboardId: dashboardId
-            });
-        }
-
-        serverLogger.info(`Job ${jobId} created. Queued ${articlesToCheck.length} articles for dashboard ${dashboardId}.`);
-        return jobId;
-    }
+    const { startSearchJob } = require('./job-starter.js');
+    const { getFeedCategories } = require('./rss-aggregator.js');
 
     // AUTHENTICATION ROUTES
     app.post('/api/login', async (req, res) => {
@@ -224,13 +160,13 @@ async function main() {
 
     app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        const { name, interval_minutes, summary_style } = req.body;
+        const { name, interval_minutes, summary_style, is_active } = req.body;
         try {
             const dashboard = await db.getDashboardById(id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
                 return res.status(403).json({ error: "Forbidden" });
             }
-            const updatedDashboard = await db.updateDashboardSettings(id, { name, interval_minutes, summary_style });
+            const updatedDashboard = await db.updateDashboardSettings(id, { name, interval_minutes, summary_style, is_active });
             res.json(updatedDashboard);
         } catch (error) {
             serverLogger.error(`Error updating dashboard ${id}:`, error);
@@ -257,10 +193,12 @@ async function main() {
 
     app.post("/api/dashboards/:id/run-search", isAuthenticated, async (req, res) => {
         const { id } = req.params;
+        const { rss_categories = [] } = req.body; // Expects an array of category keys
+
         serverLogger.info(`/api/dashboards/${id}/run-search POST route started for user ${req.session.userId}`);
         
         try {
-            const jobId = await startSearchJob(parseInt(id, 10), req.session.userId);
+            const jobId = await startSearchJob(parseInt(id, 10), req.session.userId, rss_categories);
             if (!jobId) {
                 return res.status(200).json({ jobId: null, message: "No articles found for this dashboard's topic." });
             }
@@ -368,6 +306,21 @@ async function main() {
             serverLogger.error(`Error fetching results for job ${id}:`, err);
             await db.updateJobStatus(id, 'failed').catch(e => serverLogger.error('Failed to update job status on error:', e));
             res.status(500).json({ error: "Error fetching job results" });
+        }
+    });
+
+    // --- RSS AGGREGATOR API ---
+    app.get('/api/rss/categories', isAuthenticated, async (req, res) => {
+        try {
+            const categories = await getFeedCategories();
+            const categoryNames = Object.keys(categories).map(key => ({
+                key: key,
+                name: categories[key].name
+            }));
+            res.json(categoryNames);
+        } catch (error) {
+            serverLogger.error('Error fetching RSS categories:', error);
+            res.status(500).json({ error: 'Failed to fetch RSS categories' });
         }
     });
 

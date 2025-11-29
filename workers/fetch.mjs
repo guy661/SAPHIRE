@@ -3,6 +3,8 @@ import redisConnection from '../redis.mjs';
 import queues from '../queues.mjs';
 import * as db from '../database-postgres.js';
 import { getArticleUrl, extractArticleText, PaywallError } from '../article-parser.js';
+import pkg from '../task.js';
+const { headlineCheckTask } = pkg;
 import { Logger, EMOJIS } from '../utils.js';
 
 const logger = new Logger('Fetch Worker', 'blue', EMOJIS.fetch);
@@ -41,7 +43,7 @@ const worker = new Worker('fetch', async (job) => {
         // 3. Update the database with the extracted content
         await db.updateArticleContent(articleId, content, title, finalUrl);
 
-        // 4. Get dashboard and user info for the next stage
+        // 4. Get dashboard and user info for the next stages
         const dashboard = await db.getDashboardById(dashboardId);
         if (!dashboard || !dashboard.user_intent) {
             throw new Error(`Could not find dashboard or user_intent for dashboardId ${dashboardId}.`);
@@ -52,7 +54,23 @@ const worker = new Worker('fetch', async (job) => {
             throw new Error(`Could not find user with userId ${dashboard.user_id}.`);
         }
 
-        // 5. Queue the article for the semantic summary stage
+        // 5. Perform headline pre-check for cost saving
+        const headlineCheck = await headlineCheckTask({
+            data: {
+                articleTitle: title,
+                userTopic: dashboard.user_intent,
+                language: user.language || 'de'
+            }
+        });
+
+        if (!headlineCheck.is_headline_relevant) {
+            const reason = 'Article headline deemed irrelevant during pre-check.';
+            logger.info(`Job ${job.id}: ${reason} for article ${articleId}. Stopping processing.`);
+            await db.updateArticleSemanticRelevance(articleId, false, reason);
+            return { success: true, finalUrl: realUrl, relevant: false, reason: reason };
+        }
+
+        // 6. Queue the article for the full semantic summary stage
         await semanticSummaryQueue.add('semantic-summary', {
             articleId,
             userTopic: dashboard.user_intent,
@@ -60,7 +78,7 @@ const worker = new Worker('fetch', async (job) => {
         });
 
         logger.info(`Job ${job.id}: Successfully processed and queued for semantic summary: ${articleId}`);
-        return { success: true, finalUrl: realUrl };
+        return { success: true, finalUrl: realUrl, relevant: true };
 
     } catch (err) {
         if (err instanceof PaywallError) {
@@ -75,7 +93,7 @@ const worker = new Worker('fetch', async (job) => {
 
 }, {
     connection: redisConnection,
-    concurrency: 10
+    concurrency: 2
 });
 
 worker.on('completed', (job, result) => {
