@@ -59,20 +59,62 @@ class Logger {
 
 const apiKeys = (process.env.GEMINI_API_KEYS || '').split(',').filter(Boolean);
 const apiInstances = apiKeys.map(key => new GoogleGenerativeAI(key));
-let apiKeyIndex = 0;
+
+// --- Global Rate Limiting State ---
+const apiKeyRequestTimestamps = apiKeys.map(() => []);
+const REQUEST_LIMIT_PER_MINUTE = 10;
+const TIME_WINDOW_MS = 60000;
+let apiKeyIndex = 0; // Used as a starting point for the search to ensure rotation
+const rateLimitLogger = new Logger('RateLimiter', 'yellow', '⏳');
+
+async function getNextAvailableApiClient() {
+    if (apiInstances.length === 0) {
+        throw new Error('No API keys provided for Gemini.');
+    }
+
+    while (true) {
+        let earliestNextAvailableTime = Infinity;
+
+        for (let i = 0; i < apiInstances.length; i++) {
+            const currentIndex = (apiKeyIndex + i) % apiInstances.length;
+            const timestamps = apiKeyRequestTimestamps[currentIndex];
+            const now = Date.now();
+
+            // Remove timestamps older than the time window
+            while (timestamps.length > 0 && now - timestamps[0] > TIME_WINDOW_MS) {
+                timestamps.shift();
+            }
+
+            // If the key is under the limit, use it
+            if (timestamps.length < REQUEST_LIMIT_PER_MINUTE) {
+                timestamps.push(now);
+                apiKeyIndex = (currentIndex + 1) % apiInstances.length; // Set next starting point
+                return apiInstances[currentIndex];
+            }
+
+            // Otherwise, calculate the earliest time this key will be available again
+            const nextAvailableTime = timestamps[0] + TIME_WINDOW_MS;
+            if (nextAvailableTime < earliestNextAvailableTime) {
+                earliestNextAvailableTime = nextAvailableTime;
+            }
+        }
+
+        // If all keys are busy, wait until the earliest one becomes available
+        const waitTime = earliestNextAvailableTime - Date.now() + 50; // +50ms buffer
+        if (waitTime > 0) {
+            rateLimitLogger.warn(`All API keys are busy. Waiting for ${Math.ceil(waitTime / 1000)}s...`);
+            await new Promise(resolve => setTimeout(resolve, waitTime));
+        }
+    }
+}
+// --- End of Global Rate Limiting ---
 
 function getApiKeyCount() {
     return apiKeys.length;
 }
 
 async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, maxOutputTokens = 2048) {
-    if (apiInstances.length === 0) {
-        throw new Error('No API keys provided for Gemini.');
-    }
-
-    const genAI = apiInstances[apiKeyIndex];
-    apiKeyIndex = (apiKeyIndex + 1) % apiInstances.length;
-
+    const genAI = await getNextAvailableApiClient();
     const generativeModel = genAI.getGenerativeModel({ model });
     const result = await generativeModel.generateContent(prompt);
     const response = await result.response;
@@ -80,13 +122,7 @@ async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, m
 }
 
 async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', temperature = 0.5) {
-    if (apiInstances.length === 0) {
-        throw new Error('No API keys provided for Gemini.');
-    }
-
-    const genAI = apiInstances[apiKeyIndex];
-    apiKeyIndex = (apiKeyIndex + 1) % apiInstances.length;
-
+    const genAI = await getNextAvailableApiClient();
     const generativeModel = genAI.getGenerativeModel({
         model: model,
         tools: tools,

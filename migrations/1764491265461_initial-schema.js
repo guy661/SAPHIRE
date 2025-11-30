@@ -1,0 +1,58 @@
+/* eslint-disable camelcase */
+
+exports.shorthands = undefined;
+
+exports.up = pgm => {
+    pgm.sql(`
+        CREATE TABLE users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            language VARCHAR(10) DEFAULT 'de',
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE dashboards (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            name VARCHAR(255) NOT NULL,
+            user_intent TEXT,
+            interval_minutes INTEGER,
+            is_active BOOLEAN NOT NULL DEFAULT false,
+            summary_style VARCHAR(255),
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE jobs (
+            id TEXT PRIMARY KEY,
+            dashboard_id INTEGER NOT NULL REFERENCES dashboards(id) ON DELETE CASCADE,
+            status VARCHAR(50) NOT NULL,
+            meta_summary TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE articles (
+            id SERIAL PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            title TEXT,
+            link TEXT NOT NULL,
+            pub_date TIMESTAMP WITH TIME ZONE,
+            content TEXT,
+            is_relevant BOOLEAN,
+            relevance_reason TEXT,
+            status VARCHAR(50) DEFAULT 'pending',
+            error_message TEXT,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
+};
+
+exports.down = pgm => {
+    pgm.sql(`
+        DROP TABLE articles;
+        DROP TABLE jobs;
+        DROP TABLE dashboards;
+        DROP TABLE users;
+    `);
+};

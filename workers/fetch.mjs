@@ -5,12 +5,21 @@ import * as db from '../database-postgres.js';
 import { getArticleUrl, extractArticleText, PaywallError } from '../article-parser.js';
 import pkg from '../task.js';
 const { headlineCheckTask } = pkg;
-import { Logger, EMOJIS } from '../utils.js';
+import { Logger, EMOJIS, getApiKeyCount } from '../utils.js';
 
 const logger = new Logger('Fetch Worker', 'blue', EMOJIS.fetch);
 const bullLogger = new Logger('BullMQ', 'red', EMOJIS.bull);
 
 const { semanticSummaryQueue } = queues;
+
+// Dynamically set concurrency and rate limiting based on the number of API keys
+const apiKeyCount = getApiKeyCount();
+if (apiKeyCount === 0) {
+    logger.error('No GEMINI_API_KEYS found in .env file. The fetch worker cannot start.');
+    process.exit(1);
+}
+
+logger.info(`Found ${apiKeyCount} API key(s). Setting worker concurrency to ${apiKeyCount}.`);
 
 const worker = new Worker('fetch', async (job) => {
     const { articleId, url: googleUrl, dashboardId } = job.data;
@@ -93,7 +102,7 @@ const worker = new Worker('fetch', async (job) => {
 
 }, {
     connection: redisConnection,
-    concurrency: 2
+    concurrency: apiKeyCount
 });
 
 worker.on('completed', (job, result) => {

@@ -8,7 +8,8 @@
     "server": "node server.js",
     "worker": "node workers/index.mjs",
     "scheduler": "node scheduler.mjs",
-    "start": "concurrently \"npm run server\" \"npm run worker\" \"npm run scheduler\""
+    "migrate": "node run-migrate.js",
+    "start": "npm run migrate up && concurrently \"npm run server\" \"npm run worker\" \"npm run scheduler\""
   },
   "keywords": [],
   "author": "",
@@ -29,7 +30,9 @@
     "ioredis": "^5.8.2",
     "jsdom": "^27.2.0",
     "node-fetch": "^2.7.0",
+    "node-pg-migrate": "^8.0.3",
     "pg": "^8.16.3",
+    "puppeteer": "^24.31.0",
     "rss-parser": "^3.13.0",
     "xrss": "^1.1.0"
   },

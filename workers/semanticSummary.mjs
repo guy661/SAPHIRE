@@ -1,14 +1,21 @@
-
 import { Worker } from 'bullmq';
 import redisConnection from '../redis.mjs';
 import * as db from '../database-postgres.js';
 import pkg from '../task.js';
 const { semanticCheckTask } = pkg;
-import { retry, Logger, EMOJIS } from '../utils.js';
+import { retry, Logger, EMOJIS, getApiKeyCount } from '../utils.js';
 
 const logger = new Logger('Semantic Worker', 'magenta', EMOJIS.semantic);
 const bullLogger = new Logger('BullMQ', 'red', EMOJIS.bull);
 
+// Dynamically set concurrency and rate limiting based on the number of API keys
+const apiKeyCount = getApiKeyCount();
+if (apiKeyCount === 0) {
+    logger.error('No GEMINI_API_KEYS found in .env file. The semantic worker cannot start.');
+    process.exit(1);
+}
+
+logger.info(`Found ${apiKeyCount} API key(s). Setting worker concurrency to ${apiKeyCount}.`);
 
 const worker = new Worker('semantic-summary', async (job) => {
     const { articleId, userTopic, language } = job.data;
@@ -48,7 +55,7 @@ const worker = new Worker('semantic-summary', async (job) => {
     }
 }, { 
     connection: redisConnection,
-    concurrency: 2
+    concurrency: apiKeyCount
 });
 
 worker.on('completed', (job, result) => {

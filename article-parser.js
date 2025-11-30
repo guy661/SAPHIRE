@@ -1,5 +1,6 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
+const puppeteer = require('puppeteer');
 const { Logger, EMOJIS } = require('./utils');
 
 const parserLogger = new Logger('Parser', 'cyan', EMOJIS.task);
@@ -11,20 +12,121 @@ class PaywallError extends Error {
     }
 }
 
-// Refined keywords and selectors based on user feedback.
-// Generic terms like "abonnement" or "subscribe" are removed.
 const PAYWALL_INDICATORS = {
-    keywords: [
-        'paywall', 'jetzt freischalten', 'nur für abonnenten', 
-        'exklusiver inhalt', 'vollständigen artikel lesen', 'anmelden zum lesen'
-    ],
-    selectors: [
-        '.paywall', '#paywall-gate', '[id*="paywall"]', '[class*="paywall"]',
-        '.premium-content', '.locked-content', '.subscription-required',
-        '#js-paywall-screen', '.article-gating', '[class*="access-denied"]',
-        '[class*="pay-wall"]'
-    ]
+    keywords: ['paywall', 'jetzt freischalten', 'nur für abonnenten', 'exklusiver inhalt', 'vollständigen artikel lesen', 'anmelden zum lesen'],
+    selectors: ['.paywall', '#paywall-gate', '[id*="paywall"]', '[class*="paywall"]', '.premium-content', '.locked-content', '.subscription-required', '#js-paywall-screen', '.article-gating', '[class*="access-denied"]', '[class*="pay-wall"]']
 };
+
+function _parseHtmlWithCheerio(html, realUrl) {
+    const $ = cheerio.load(html);
+    const domain = new URL(realUrl).hostname;
+    
+    let articleContent = '';
+
+    // DOMAIN-SPEZIFISCHE REGELN
+    if (domain.includes('tagesschau.de')) {
+        articleContent = $('main article p').map((i, el) => $(el).text().trim()).get().join('\n');
+    } else if (domain.includes('spiegel.de')) {
+        articleContent = $('article section p').map((i, el) => $(el).text().trim()).get().join('\n');
+    } else if (domain.includes('fr.de') || domain.includes('welt.de') || domain.includes('faz.net') || domain.includes('taz.de') || domain.includes('hasepost.de')) {
+        articleContent = $('article p, section p, main p').map((i, el) => $(el).text().trim()).get().join('\n');
+    } else {
+        // Fallback
+        articleContent = $('p').map((i, el) => $(el).text().trim()).get().join('\n');
+    }
+    
+    const title = $('head title').text().trim() || 'No Title Found';
+    const cleanedContent = articleContent.replace(/\s{3,}/g, '\n\n').trim();
+
+    // --- NEW "INTELLIGENT" PAYWALL DETECTION ---
+    if (cleanedContent.length < 400) {
+        parserLogger.warn(`Content is short (${cleanedContent.length} chars). Scanning for high-confidence paywall indicators.`);
+        const pageText = $.text().toLowerCase();
+        for (const keyword of PAYWALL_INDICATORS.keywords) {
+            if (pageText.includes(keyword)) {
+                throw new PaywallError(`Paywall suspected: Content is short AND keyword "${keyword}" was found.`);
+            }
+        }
+        for (const selector of PAYWALL_INDICATORS.selectors) {
+            if ($(selector).length > 0) {
+                throw new PaywallError(`Paywall suspected: Content is short AND selector "${selector}" was found.`);
+            }
+        }
+    }
+    // --- END NEW PAYWALL DETECTION ---
+
+    parserLogger.info(`Successfully extracted content. Title: "${title}", Length: ${cleanedContent.length}`);
+    return { title, content: cleanedContent, finalUrl: realUrl };
+}
+
+async function _extractWithPuppeteer(realUrl) {
+    parserLogger.warn(`Axios failed. Falling back to Puppeteer for: ${realUrl}`);
+    let browser = null;
+    try {
+        browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        const page = await browser.newPage();
+        await page.setJavaScriptEnabled(true);
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+        
+        await page.goto(realUrl, { waitUntil: 'networkidle2', timeout: 30000 });
+        
+        const html = await page.content();
+        return _parseHtmlWithCheerio(html, realUrl);
+    } finally {
+        if (browser) {
+            await browser.close();
+        }
+    }
+}
+
+async function extractArticleText(realUrl) {
+    parserLogger.info(`Extracting content from real URL: ${realUrl}`);
+    try {
+        // --- First attempt: Axios (fast) ---
+        parserLogger.debug(`Attempting extraction with Axios...`);
+        const response = await axios.get(realUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'Accept-Encoding': 'gzip, deflate, br, zstd',
+                'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                'DNT': '1',
+                'Upgrade-Insecure-Requests': '1',
+                'Referer': 'https://www.google.com/'
+            },
+            timeout: 30000,
+            maxRedirects: 10
+        });
+        return _parseHtmlWithCheerio(response.data, realUrl);
+
+    } catch (err) {
+        // --- Fallback: Puppeteer (robust) ---
+        const isNetworkError = err.isAxiosError && (!err.response || [403, 401, 503].includes(err.response.status));
+        const isTimeout = err.code === 'ECONNABORTED';
+        const isRedirectError = err.message && err.message.toLowerCase().includes('many redirects');
+
+        if (isNetworkError || isTimeout || isRedirectError) {
+            try {
+                return await _extractWithPuppeteer(realUrl);
+            } catch (puppeteerError) {
+                if (puppeteerError instanceof PaywallError) {
+                    parserLogger.warn(puppeteerError.message);
+                    throw puppeteerError;
+                }
+                parserLogger.error(`Puppeteer fallback also failed for ${realUrl}:`, puppeteerError);
+                throw new Error(`Puppeteer fallback failed: ${puppeteerError.message}`);
+            }
+        }
+        
+        if (err instanceof PaywallError) {
+            parserLogger.warn(err.message);
+            throw err;
+        }
+
+        parserLogger.error(`Unhandled error fetching or parsing content from ${realUrl}:`, err);
+        throw new Error(`Could not fetch or parse content from ${realUrl}: ${err.message}`);
+    }
+}
 
 // Source - https://stackoverflow.com/a
 // Posted by GTK
@@ -58,7 +160,7 @@ async function getArticleUrl(googleRssUrl) {
 
     const headers = {
       'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
     };
 
     const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers, timeout: 10000 });
@@ -85,78 +187,5 @@ async function getArticleUrl(googleRssUrl) {
     return articleUrl;
 }
 
-/**
- * Extrahiert Artikeltext zuverlässig mit Axios + Cheerio.
- * Funktioniert für praktisch alle Nachrichten-Seiten,
- * sofern sie den HTML-Content direkt ausliefern (kein JS-Rendering).
- */
-async function extractArticleText(realUrl) {
-    parserLogger.info(`Extracting content from real URL: ${realUrl}`);
-    try {
-        const response = await axios.get(realUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-            },
-            timeout: 15000
-        });
-
-        const $ = cheerio.load(response.data);
-        const domain = new URL(realUrl).hostname;
-        
-        let articleContent = '';
-
-        // DOMAIN-SPEZIFISCHE REGELN
-        if (domain.includes('tagesschau.de')) {
-            articleContent = $('main article p').map((i, el) => $(el).text().trim()).get().join('\n');
-        } else if (domain.includes('spiegel.de')) {
-            articleContent = $('article section p').map((i, el) => $(el).text().trim()).get().join('\n');
-        } else if (domain.includes('fr.de') || domain.includes('welt.de') || domain.includes('faz.net') || domain.includes('taz.de') || domain.includes('hasepost.de')) {
-            articleContent = $('article p, section p, main p').map((i, el) => $(el).text().trim()).get().join('\n');
-        } else {
-            // Fallback
-            articleContent = $('p').map((i, el) => $(el).text().trim()).get().join('\n');
-        }
-        
-        const title = $('head title').text().trim() || 'No Title Found';
-        const cleanedContent = articleContent.replace(/\s{3,}/g, '\n\n').trim();
-
-        // --- NEW "INTELLIGENT" PAYWALL DETECTION ---
-        // Only run detection if the extracted content seems suspiciously short.
-        if (cleanedContent.length < 400) {
-            parserLogger.warn(`Content is short (${cleanedContent.length} chars). Scanning for high-confidence paywall indicators.`);
-            const pageText = $.text().toLowerCase();
-            for (const keyword of PAYWALL_INDICATORS.keywords) {
-                if (pageText.includes(keyword)) {
-                    throw new PaywallError(`Paywall suspected: Content is short AND keyword "${keyword}" was found.`);
-                }
-            }
-            // Check for selectors only if content is short
-            for (const selector of PAYWALL_INDICATORS.selectors) {
-                if ($(selector).length > 0) {
-                    throw new PaywallError(`Paywall suspected: Content is short AND selector "${selector}" was found.`);
-                }
-            }
-        }
-        // --- END NEW PAYWALL DETECTION ---
-
-        parserLogger.info(`Successfully extracted content. Title: "${title}", Length: ${cleanedContent.length}`);
-        
-        return {
-            title: title,
-            content: cleanedContent,
-            finalUrl: realUrl
-        };
-
-    } catch (err) {
-        if (err instanceof PaywallError) {
-            parserLogger.warn(err.message);
-            throw err;
-        }
-        parserLogger.error(`Error fetching or parsing content from ${realUrl}:`, err);
-        throw new Error(`Could not fetch or parse content from ${realUrl}: ${err.message}`);
-    }
-}
 
 module.exports = { getArticleUrl, extractArticleText, PaywallError };

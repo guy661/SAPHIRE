@@ -4,72 +4,6 @@ const { Logger, EMOJIS } = require('./utils');
 
 const dbLogger = new Logger('Database', 'cyan', EMOJIS.db);
 
-async function init() {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS users (
-                id SERIAL PRIMARY KEY,
-                username VARCHAR(255) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL,
-                language VARCHAR(10) DEFAULT 'de',
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS dashboards (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                name VARCHAR(255) NOT NULL,
-                user_intent TEXT,
-                interval_minutes INTEGER,
-                is_active BOOLEAN NOT NULL DEFAULT false,
-                summary_style VARCHAR(255),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                dashboard_id INTEGER NOT NULL REFERENCES dashboards(id) ON DELETE CASCADE,
-                status VARCHAR(50) NOT NULL,
-                meta_summary TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await client.query(`
-            CREATE TABLE IF NOT EXISTS articles (
-                id SERIAL PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                title TEXT,
-                link TEXT NOT NULL,
-                pub_date TIMESTAMP WITH TIME ZONE,
-                content TEXT,
-                is_relevant BOOLEAN,
-                relevance_reason TEXT,
-                status VARCHAR(50) DEFAULT 'pending',
-                error_message TEXT,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await client.query('COMMIT');
-        dbLogger.info('Database tables ensured successfully.');
-    } catch (error) {
-        await client.query('ROLLBACK');
-        dbLogger.error('Error ensuring database tables:', error);
-        throw error;
-    } finally {
-        client.release();
-    }
-}
-
 async function createUser(username, password, language) {
     const hashedPassword = await bcrypt.hash(password, 10);
     const res = await pool.query(
@@ -87,10 +21,6 @@ async function getUserByUsername(username) {
 async function getUserById(id) {
     const res = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
     return res.rows[0];
-}
-
-async function updateUserLanguage(userId, language) {
-    await pool.query('UPDATE users SET language = $1 WHERE id = $2', [language, userId]);
 }
 
 // Dashboard CRUD functions
@@ -208,113 +138,6 @@ async function updateJobMetaSummary(jobId, summary) {
     );
 }
 
-async function clearDatabase() {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        await client.query('DELETE FROM articles');
-        await client.query('DELETE FROM jobs');
-        await client.query('DELETE FROM dashboards');
-        await client.query('DELETE FROM users');
-        await client.query('COMMIT');
-    } catch (error) {
-        await client.query('ROLLBACK');
-        throw error;
-    } finally {
-        client.release();
-    }
-}
-
-async function runMigrations() {
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        dbLogger.info('Checking for necessary database migrations...');
-
-        // Migration 1: Drop 'topics' table if it exists
-        const topicsTableRes = await client.query("SELECT to_regclass('public.topics')");
-        if (topicsTableRes.rows[0].to_regclass) {
-            dbLogger.warn('Old "topics" table detected. Dropping it...');
-            await client.query('DROP TABLE public.topics CASCADE');
-            dbLogger.info('Migration successful: "topics" table dropped.');
-        }
-
-        // Migration 2: Check if 'jobs' table needs to be migrated (from user_id to dashboard_id)
-        const jobsColumnRes = await client.query(`
-            SELECT column_name 
-            FROM information_schema.columns 
-            WHERE table_name='jobs' AND column_name='user_id'
-        `);
-
-        if (jobsColumnRes.rows.length > 0) {
-            dbLogger.warn('Old schema detected in "jobs" table (user_id column found). Running migration...');
-            
-            // Because old jobs cannot be mapped to non-existent dashboards,
-            // we will clear the dependent tables to ensure consistency.
-            dbLogger.warn('Deleting all records from "articles" and "jobs" to apply new schema...');
-            await client.query('DELETE FROM articles');
-            await client.query('DELETE FROM jobs');
-
-            // Find the foreign key constraint name to drop it
-            const constraintRes = await client.query(`
-                SELECT conname
-                FROM pg_constraint
-                WHERE conrelid = 'jobs'::regclass AND confrelid = 'users'::regclass;
-            `);
-
-            for (const row of constraintRes.rows) {
-                dbLogger.warn(`Dropping foreign key constraint "${row.conname}" on "jobs" table.`);
-                await client.query(`ALTER TABLE jobs DROP CONSTRAINT "${row.conname}"`);
-            }
-            
-            dbLogger.warn('Dropping old "user_id" column from "jobs" table...');
-            await client.query('ALTER TABLE jobs DROP COLUMN user_id');
-
-            dbLogger.warn('Adding new "dashboard_id" column to "jobs" table...');
-            await client.query('ALTER TABLE jobs ADD COLUMN dashboard_id INTEGER NOT NULL');
-            
-            dbLogger.warn('Adding new foreign key constraint for "dashboard_id"...');
-            await client.query(`
-                ALTER TABLE jobs 
-                ADD CONSTRAINT jobs_dashboard_id_fkey 
-                FOREIGN KEY (dashboard_id) 
-                REFERENCES dashboards(id) 
-                ON DELETE CASCADE
-            `);
-            
-            dbLogger.info('Migration successful: "jobs" table updated.');
-        } else {
-            dbLogger.info('"jobs" table schema is up to date.');
-        }
-
-        // Migration 3: Add is_active to dashboards if it doesn't exist
-        const dashboardColumnRes = await client.query(`
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name='dashboards' AND column_name='is_active'
-        `);
-
-        if (dashboardColumnRes.rows.length === 0) {
-            dbLogger.warn('Old schema detected in "dashboards" table (is_active column missing). Running migration...');
-            await client.query('ALTER TABLE dashboards ADD COLUMN is_active BOOLEAN NOT NULL DEFAULT false');
-            await client.query('UPDATE dashboards SET is_active = false');
-            dbLogger.info('Migration successful: "is_active" column added and updated on "dashboards" table.');
-        } else {
-            dbLogger.info('"dashboards" table schema is up to date.');
-        }
-
-        await client.query('COMMIT');
-        dbLogger.info('Database migrations checked successfully.');
-
-    } catch (error) {
-        await client.query('ROLLBACK');
-        dbLogger.error('Error running migrations:', error);
-        throw error;
-    } finally {
-        client.release();
-    }
-}
-
 async function getLatestCompletedJobForDashboard(dashboardId) {
     const res = await pool.query(
         `SELECT * FROM jobs 
@@ -340,16 +163,10 @@ async function getAllDashboardsWithInterval() {
     return res.rows;
 }
 
-init().then(runMigrations).catch(err => {
-    dbLogger.error("Failed to init or migrate database on startup", err);
-});
-
 module.exports = {
-    init,
     createUser,
     getUserByUsername,
     getUserById,
-    updateUserLanguage,
     // Dashboard functions
     createDashboard,
     getDashboardById,
@@ -371,5 +188,4 @@ module.exports = {
     updateArticleStatus,
     updateJobStatus,
     updateJobMetaSummary,
-    clearDatabase,
 };
