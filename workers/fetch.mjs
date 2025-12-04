@@ -19,7 +19,9 @@ if (apiKeyCount === 0) {
     process.exit(1);
 }
 
-logger.info(`Found ${apiKeyCount} API key(s). Setting worker concurrency to ${apiKeyCount}.`);
+const concurrency = process.env.FETCH_WORKER_CONCURRENCY ? parseInt(process.env.FETCH_WORKER_CONCURRENCY, 10) : apiKeyCount;
+
+logger.info(`Setting worker concurrency to ${concurrency}. (Source: ${process.env.FETCH_WORKER_CONCURRENCY ? 'env' : 'apiKeyCount'})`);
 
 const worker = new Worker('fetch', async (job) => {
     const { articleId, url: googleUrl, dashboardId } = job.data;
@@ -102,7 +104,7 @@ const worker = new Worker('fetch', async (job) => {
 
 }, {
     connection: redisConnection,
-    concurrency: apiKeyCount
+    concurrency: concurrency
 });
 
 worker.on('completed', (job, result) => {

@@ -33,7 +33,7 @@ async function main() {
 
     const app = express();
     app.use(cors({
-        origin: 'http://localhost:3001',
+        origin: ['http://localhost:3001', 'http://localhost:5173'],
         credentials: true,
     }));
     app.use(express.json());
@@ -324,29 +324,17 @@ async function main() {
         }
     });
 
-    // --- PAGE SERVING & STATIC FILES ---
-    app.get('/', (req, res) => {
-        res.set('Cache-Control', 'no-store');
-        res.sendFile(path.join(__dirname, 'public', 'saphire.html'));
-    });
+    // --- PAGE SERVING & STATIC FILES (React Frontend) ---
 
-    // Adjusted to accept dashboard ID in the URL for context
-    app.get('/personalization/:dashboardId', isAuthenticated, async (req, res) => {
-        const { dashboardId } = req.params;
-        try {
-            const dashboard = await db.getDashboardById(dashboardId);
-            if (dashboard && dashboard.user_id === req.session.userId) {
-                res.set('Cache-control', 'no-store');
-                res.sendFile(path.join(__dirname, 'public', 'personalization-chat.html'));
-            } else {
-                res.status(403).send('Forbidden or Not Found');
-            }
-        } catch (error) {
-            res.status(500).send('Server Error');
-        }
+    // Serve the static files from the React app build directory
+    app.use(express.static(path.join(__dirname, 'frontend', 'dist')));
+
+    // The "catchall" handler: for any request that doesn't match one above,
+    // send back React's index.html file.
+    app.get('*', (req, res) => {
+        res.sendFile(path.resolve(__dirname, 'frontend', 'dist', 'index.html'));
     });
     
-    app.use(express.static(path.join(__dirname, 'public')));
     
     // SERVER STARTUP
     const PORT = 3001;

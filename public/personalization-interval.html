@@ -27,6 +27,47 @@
              border-color: var(--saphir-green);
              box-shadow: 0 0 0 2px color-mix(in srgb, var(--saphir-green) 20%, transparent);
         }
+        .toggle-switch {
+            position: relative;
+            display: inline-block;
+            width: 50px;
+            height: 28px;
+        }
+        .toggle-switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(10, 20, 30, 0.7);
+            border: 1px solid var(--color-border);
+            transition: .4s;
+            border-radius: 28px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 20px;
+            width: 20px;
+            left: 3px;
+            bottom: 3px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: var(--saphir-green);
+            border-color: var(--saphir-green);
+        }
+        input:checked + .slider:before {
+            transform: translateX(22px);
+        }
     </style>
 </head>
 <body>
@@ -39,6 +80,16 @@
             </p>
 
             <form id="settingsForm">
+                <!-- Activation Switch -->
+                <h2 style="font-size: 1.1rem; font-weight: 500; color: var(--color-text-secondary); margin-top: 1.5rem; margin-bottom: 1rem; border-top: 1px solid var(--color-border); padding-top: 1.5rem;">Dashboard Status</h2>
+                <div class="form-group" style="display: flex; justify-content: space-between; align-items: center;">
+                    <label for="is_active" style="font-size: 0.875rem; color: var(--color-text-secondary);">Dashboard für die automatische Suche aktivieren</label>
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="is_active">
+                        <span class="slider"></span>
+                    </label>
+                </div>
+
                 <!-- Notification Interval Section -->
                 <h2 style="font-size: 1.1rem; font-weight: 500; color: var(--color-text-secondary); margin-top: 1.5rem; margin-bottom: 1rem; border-top: 1px solid var(--color-border); padding-top: 1.5rem;">Benachrichtigungsintervall</h2>
                 <div class="form-group" style="display: flex; flex-direction: row; gap: 1rem; align-items: flex-end;">
@@ -121,6 +172,7 @@
             const settingsForm = document.getElementById('settingsForm');
             const intervalValueEl = document.getElementById('interval_value');
             const intervalUnitEl = document.getElementById('interval_unit');
+            const isActiveEl = document.getElementById('is_active');
             const radioLabels = document.querySelectorAll('.radio-label');
             const saveBtn = document.getElementById('saveSettingsBtn');
             const urlParams = new URLSearchParams(window.location.search);
@@ -132,19 +184,56 @@
                 return;
             }
 
-            // Add visual selection indicator for radio buttons
-            radioLabels.forEach(label => {
-                const radio = label.querySelector('input');
-                if (radio.checked) {
-                    label.classList.add('selected');
+            async function loadDashboardData() {
+                try {
+                    const data = await authenticatedFetch(`/api/dashboards/${dashboardId}`);
+                    
+                    if (data.interval_minutes) {
+                        const mins = data.interval_minutes;
+                        if (mins > 0 && mins % 1440 === 0) {
+                            intervalValueEl.value = mins / 1440;
+                            intervalUnitEl.value = 'days';
+                        } else if (mins > 0 && mins % 60 === 0) {
+                            intervalValueEl.value = mins / 60;
+                            intervalUnitEl.value = 'hours';
+                        } else {
+                            intervalValueEl.value = mins;
+                            intervalUnitEl.value = 'minutes';
+                        }
+                    } else {
+                        intervalValueEl.value = 24;
+                        intervalUnitEl.value = 'hours';
+                    }
+
+                    const styleToSelect = data.summary_style || 'bullets';
+                    const radioToSelect = document.querySelector(`input[name="summary_style"][value="${styleToSelect}"]`);
+                    if (radioToSelect) radioToSelect.checked = true;
+                    
+                    isActiveEl.checked = data.is_active || false;
+                    
+                    updateRadioSelection();
+
+                } catch (error) {
+                    alert(`Fehler beim Laden der Dashboard-Daten: ${error.message}`);
                 }
-                radio.addEventListener('change', () => {
-                    radioLabels.forEach(otherLabel => otherLabel.classList.remove('selected'));
+            }
+
+            function updateRadioSelection() {
+                radioLabels.forEach(label => {
+                    const radio = label.querySelector('input');
                     if (radio.checked) {
                         label.classList.add('selected');
+                    } else {
+                        label.classList.remove('selected');
                     }
                 });
+            }
+
+            radioLabels.forEach(label => {
+                label.querySelector('input').addEventListener('change', updateRadioSelection);
             });
+            
+            loadDashboardData();
 
 
             settingsForm.addEventListener('submit', async (e) => {
@@ -153,10 +242,6 @@
                 saveBtn.textContent = 'Speichern...';
 
                 try {
-                    // Fetch the current dashboard to get its name
-                    const currentDashboard = await authenticatedFetch(`/api/dashboards/${dashboardId}`);
-                    const currentName = currentDashboard.name;
-
                     const intervalValue = parseInt(intervalValueEl.value, 10);
                     const intervalUnit = intervalUnitEl.value;
                     let intervalMinutes = 0;
@@ -172,9 +257,9 @@
                     const selectedStyle = document.querySelector('input[name="summary_style"]:checked');
 
                     const settingsData = {
-                        name: currentName, // Pass the name along so it doesn't get erased
                         interval_minutes: intervalMinutes,
-                        summary_style: selectedStyle ? selectedStyle.value : 'standard'
+                        summary_style: selectedStyle ? selectedStyle.value : 'standard',
+                        is_active: isActiveEl.checked
                     };
 
                     await authenticatedFetch(`/api/dashboards/${dashboardId}`, {
@@ -182,13 +267,13 @@
                         body: JSON.stringify(settingsData),
                     });
 
-                    // Redirect to the main page, which should now show the new/updated dashboard
-                    window.location.href = '/';
+                    // Redirect to the source selection page
+                    window.location.href = `/sources.html?dashboardId=${dashboardId}`;
 
                 } catch (error) {
                     alert(`Fehler beim Speichern der Einstellungen: ${error.message}`);
                     saveBtn.disabled = false;
-                    saveBtn.textContent = 'Speichern & Dashboard öffnen';
+                    saveBtn.textContent = 'Speichern & Weiter zu den Quellen';
                 }
             });
         });
