@@ -31,11 +31,30 @@ const semanticSummaryQueue = new Queue('semantic-summary', {
     }
 });
 
+const synthesisQueue = new Queue('synthesis', {
+    connection: redisConnection,
+    limiter: {
+        max: 20,
+        duration: 60000
+    },
+    defaultJobOptions: {
+        attempts: 2,
+        backoff: {
+            type: 'exponential',
+            delay: 5000,
+        },
+        removeOnComplete: true,
+        removeOnFail: 1000,
+    }
+});
+
 console.log('✅-Queue fetchQueue initialized');
 console.log('✅-Queue semanticSummaryQueue initialized');
+console.log('✅-Queue synthesisQueue initialized');
 
 
 export default {
     fetchQueue,
-    semanticSummaryQueue
+    semanticSummaryQueue,
+    synthesisQueue
 };

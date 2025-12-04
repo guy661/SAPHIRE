@@ -50,6 +50,11 @@ export async function getDashboardById(id: string) {
     return handleResponse(response);
 }
 
+export async function getDashboardJobs(id: string) {
+    const response = await fetch(`${API_BASE_URL}/dashboards/${id}/jobs`);
+    return handleResponse(response);
+}
+
 export async function runDashboardSearch(id: string) {
     const response = await fetch(`${API_BASE_URL}/dashboards/${id}/run-search`, {
         method: 'POST'
@@ -59,6 +64,15 @@ export async function runDashboardSearch(id: string) {
 
 export async function getJobStatus(jobId: string) {
     const response = await fetch(`${API_BASE_URL}/job/${jobId}`);
+    return handleResponse(response);
+}
+
+export async function postJobChat(jobId: string, message: string, chatHistory: any[], summary: string) {
+    const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, chatHistory, summary }),
+    });
     return handleResponse(response);
 }
 

@@ -163,6 +163,14 @@ async function getAllDashboardsWithInterval() {
     return res.rows;
 }
 
+async function getJobsByDashboardId(dashboardId) {
+    const res = await pool.query(
+        'SELECT id, status, meta_summary, created_at FROM jobs WHERE dashboard_id = $1 ORDER BY created_at DESC', 
+        [dashboardId]
+    );
+    return res.rows;
+}
+
 module.exports = {
     createUser,
     getUserByUsername,
@@ -178,6 +186,7 @@ module.exports = {
     // Job functions
     createJob,
     getJob,
+    getJobsByDashboardId, // <-- Export the new function
     getActiveJobForDashboard,
     getLatestCompletedJobForDashboard,
     createJobArticle,

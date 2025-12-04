@@ -135,8 +135,8 @@ async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', te
         }
     });
 
-    const lastMessage = chatHistory[chatHistory.length - 1].parts[0].text;
-    const result = await chat.sendMessage(lastMessage);
+    const lastMessageParts = chatHistory[chatHistory.length - 1].parts;
+    const result = await chat.sendMessage(lastMessageParts);
     const response = await result.response;
     
     return response.functionCalls() ? response.functionCalls() : response.text();

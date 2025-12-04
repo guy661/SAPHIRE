@@ -2,65 +2,6 @@ const { retry, callGemini, callGeminiChat, Logger, EMOJIS } = require('./utils.j
 
 const taskLogger = new Logger('Task', 'yellow', EMOJIS.task);
 
-const headlineCheckTask = async ({ data: { articleTitle, userTopic, language = 'de' } }) => {
-    taskLogger.info(`Performing headline check for title "${articleTitle}" against topic "${userTopic.substring(0, 80)}"...`);
-
-    const headlineCheckPrompts = {
-        'de': (topic, title) => `
-            Du bist ein extrem schneller Nachrichten-Vorsortierer. Deine einzige Aufgabe ist es, anhand des Titels zu entscheiden, ob ein Artikel möglicherweise für das folgende Nutzerinteresse relevant ist. Sei dabei sehr großzügig; schließe nur Artikel aus, deren Titel GANZ KLAR nichts mit dem Thema zu tun hat.
-
-            **Nutzerinteresse:** "${topic}"
-            **Artikeltitel:** "${title}"
-
-            **Deine Aufgabe:**
-            Antworte mit "ja", wenn der Titel auch nur die geringste Chance hat, relevant zu sein.
-            Antworte mit "nein", wenn der Titel offensichtlich und ohne Zweifel irrelevant ist.
-
-            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
-            { "is_headline_relevant": <true oder false> }
-        `,
-        'en': (topic, title) => `
-            You are an extremely fast news pre-sorter. Your only job is to decide from the title alone if an article could possibly be relevant to the following user interest. Be very generous; only exclude articles where the title is OBVIOUSLY unrelated to the topic.
-
-            **User Interest:** "${topic}"
-            **Article Title:** "${title}"
-
-            **Your Task:**
-            Respond with "yes" if the title has even the slightest chance of being relevant.
-            Respond with "no" if the title is obviously and without a doubt irrelevant.
-            
-            **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
-            { "is_headline_relevant": <true oder false> }
-        `
-    };
-
-    const prompt = (headlineCheckPrompts[language] || headlineCheckPrompts['de'])(userTopic, articleTitle);
-
-    try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.1);
-        taskLogger.debug(`Raw AI headline check response: ${responseString}`);
-
-        const jsonMatch = responseString.match(/\{.*\}/s);
-        if (!jsonMatch) {
-            taskLogger.warn(`No JSON object found in AI response for headline check. Defaulting to relevant.`);
-            return { is_headline_relevant: true };
-        }
-        
-        const result = JSON.parse(jsonMatch[0]);
-        if (typeof result.is_headline_relevant !== 'boolean') {
-            throw new Error('Invalid JSON structure in AI response for headline check.');
-        }
-
-        taskLogger.info(`Headline check for title "${articleTitle}" complete. Potentially relevant: ${result.is_headline_relevant}`);
-        return result;
-
-    } catch (error) {
-        taskLogger.error(`Error during headline check for title "${articleTitle}"`, error);
-        // In case of error, default to relevant to avoid accidentally filtering out good content.
-        return { is_headline_relevant: true };
-    }
-};
-
 const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) => {
     taskLogger.info(`Orchestrating chat with history length: ${chatHistory.length}`);
 
@@ -110,7 +51,7 @@ const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) =
         - At the end of the conversation, when you believe you have fully captured the intent, summarize it in a paragraph and explicitly ask the user for confirmation. 
         
         TOOL USAGE:
-        - Call the 'save_intent' function ONLY after you have formulated the final, summarized 'user_intent' AND the user has confirmed that summary (e.g., with "Yes, that looks good").
+        - Call the 'save_intent' function ONLY after you have formulated the final, summarized 'user_intent' AND the user has confirmed that summary (e.g., with "Yes, that's good").
         - In all other cases where you are waiting for a response or asking a question, simply return text.`
     };
     
@@ -223,146 +164,143 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
     }
 };
 
-const generateMetaSummaryTask = async ({ data: { articles, user_intent, language = 'de', currentDate } }) => {
-    taskLogger.info(`Generating meta summary for ${articles.length} articles.`);
+const generateSynthesizedSummaryTask = async ({ data: { articles, user_intent, language = 'de', currentDate } }) => {
+    taskLogger.info(`Generating a single synthesized summary for ${articles.length} articles.`);
 
-    const articleTexts = articles.map((a, i) => `ARTIKEL ${i + 1} (Veröffentlicht: ${new Date(a.published_at).toLocaleDateString('de-DE')}, Titel: ${a.title}):\n${a.content}\n\n`).join('');
+    const articleTexts = articles.map((a, i) => 
+        `ARTIKEL ${i + 1} (Quelle: ${new URL(a.link).hostname}, Titel: ${a.fetchedContent.title}):\n${a.fetchedContent.content}\n\n------------------\n\n`
+    ).join('');
 
-    const metaSummaryPrompts = {
+    const synthesisPrompts = {
         'de': (intent, content, date) => `
-            Du bist ein hochkarätiger, zeitbewusster Analyst, der ein tägliches Briefing für einen gut informierten Kunden erstellt.
-            
-            **Wichtiger Kontext:**
-            - **HEUTE ist der ${date}.** Alle Zeitbezüge wie "heute", "gestern" oder "diese Woche" müssen von diesem Datum aus interpretiert werden.
-            - **Kundeninteresse:** "${intent}"
-            
-            **Deine Aufgabe:**
-            Erstelle eine "Entwicklungs-Zusammenfassung", die die neuesten und wichtigsten Geschehnisse basierend auf dem Kundeninteresse und der Zeitpräferenz synthetisiert. Deine Zusammenfassung soll nicht nur informieren, sondern eine kohärente Erzählung schaffen, die die aktuellen Entwicklungen in einen verständlichen Kontext setzt.
+            Du bist ein brillanter Chefredakteur. Deine Aufgabe ist es, aus einem Stapel ungefilterter Artikel ein einziges, schlüssiges und prägnantes Briefing für einen sehr beschäftigten Kunden zu erstellen.
 
-            **Grundregeln der Analyse:**
-            1.  **Zeitliche Relevanz verstehen:** Interpretiere die Absicht des Nutzers auch im Hinblick auf die Zeit. Ein Nutzer, der nach "Bundestagswahl" fragt, will HEUTE über aktuelle Debatten informiert werden, nicht über die Ergebnisse der letzten Wahl, es sei denn, diese sind für einen aktuellen Kontext relevant.
-            2.  **Fokus auf NEUE Entwicklungen:** Dein Kunde kennt sein Interessengebiet. Wiederhole keine statischen Fakten. Konzentriere dich auf das, was sich gerade entwickelt. Ältere Artikel können als Kontext dienen, um aktuelle Ereignisse zu erklären, aber die Zusammenfassung muss die neuesten Informationen priorisieren.
-            3.  **Synthese statt Auflistung:** Baue eine kohärente Erzählung. Verbinde Informationen aus verschiedenen Artikeln, um ein vollständiges Bild der aktuellen Lage zu zeichnen. Zeige auf, wie ältere Ereignisse die heutigen Entwicklungen beeinflussen. Ein Beispiel: "Aufbauend auf der Entscheidung von letzter Woche, die Zinsen unverändert zu lassen, hat die Zentralbank nun signalisiert, dass zukünftige Schritte von den Inflationsdaten abhängen werden."
-            4. **Personalisierung und Lernen:** Berücksichtige, dass dies eine fortlaufende Konversation ist. Die Zusammenfassungen werden von Tag zu Tag aufgebaut. Wenn ein Thema gestern bereits behandelt wurde, gib heute ein Update, anstatt das Thema neu einzuführen.
+            **Kundeninteresse:** "${intent}"
+            **Heutiges Datum:** ${date}
 
-            **Struktur des Briefings:**
-            1.  **Hauptüberschrift:** Eine prägnante Schlagzeile, die die Top-Entwicklung des Tages zusammenfasst.
-            2.  **Einleitung (1-2 Sätze):** Die wichtigsten neuen Erkenntnisse auf den Punkt gebracht.
-            3.  **Hauptteil:** Gliedere nach den wichtigsten *neuen* Themen. Jeder Abschnitt bekommt eine klare Überschrift. Nutze ältere Informationen, um Kontext zu geben (z.B. "Aufbauend auf der Entscheidung von letzter Woche, hat die Regierung nun...").
+            **DEINE ANWEISUNGEN:**
+            1.  **SYNTHETISIEREN, NICHT AUFLISTEN:** Deine wichtigste Aufgabe ist es, Verbindungen, Überschneidungen und Widersprüche zwischen den Artikeln zu finden. Fasse nicht jeden Artikel einzeln zusammen. Deine Aufgabe ist es, die Kernaussagen aus allen Artikeln zu einem einzigen, flüssigen Text zu verweben.
+            2.  **REDUNDANZ ELIMINIEREN:** Viele Artikel werden dieselben Grundfakten wiederholen. Erwähne eine Information nur einmal. Konzentriere dich auf die Nuancen, die unterschiedlichen Perspektiven oder die einzigartigen Details, die jeder Artikel hinzufügt.
+            3.  **STRUKTUR & KLARHEIT:** Gib deinem Briefing eine klare Struktur. 
+                - Beginne mit einer aussagekräftigen **Hauptüberschrift**.
+                - Fasse die absolut wichtigsten Erkenntnisse in einem **"Kern-Briefing"** von 2-3 Sätzen zusammen.
+                - Gliedere den Rest des Textes mit **klaren Zwischenüberschriften**, die die wichtigsten Unterthemen zusammenfassen, die sich aus den Artikeln ergeben.
+            4.  **FOKUS AUF RELEVANZ:** Behalte immer das Kundeninteresse im Auge. Nur Informationen, die direkt für dieses Interesse relevant sind, gehören in die Zusammenfassung.
 
-            **Relevante Artikel (sortiert von neu nach alt):**
+            **VERFÜGBARE ARTIKEL:**
             ${content}
 
-            Erstelle jetzt das Entwicklungs-Briefing für den Kunden.
+            Erstelle nun das synthetisierte Briefing.
         `,
         'en': (intent, content, date) => `
-            You are a top-tier, time-aware analyst creating a daily briefing for a well-informed client.
+            You are a brilliant Editor-in-Chief. Your task is to create a single, cohesive, and concise briefing for a very busy client from a pile of unfiltered articles.
 
-            **Critical Context:**
-            - **TODAY is ${date}.** All temporal references like "today," "yesterday," or "this week" must be interpreted from this date.
-            - **Client's Intent:** "${intent}"
+            **Client's Interest:** "${intent}"
+            **Today's Date:** ${date}
 
-            **Your Task:**
-            Create a "Development Summary" that synthesizes the latest and most important happenings based on the client's interest and time preference. Your summary should not just inform, but create a coherent narrative that places current developments in an understandable context.
+            **YOUR INSTRUCTIONS:**
+            1.  **SYNTHESIZE, DON'T LIST:** Your most important job is to find the connections, overlaps, and contradictions between the articles. Do not summarize each article individually. Your job is to weave the key takeaways from all articles into a single, fluid text.
+            2.  **ELIMINATE REDUNDANCY:** Many articles will repeat the same basic facts. Mention a piece of information only once. Focus on the nuances, the different perspectives, or the unique details each article adds.
+            3.  **STRUCTURE & CLARITY:** Give your briefing a clear structure. 
+                - Start with a powerful **Main Headline**.
+                - Summarize the absolute most critical findings in a **"Core Briefing"** of 2-3 sentences.
+                - Structure the rest of the text with **clear subheadings** that group the main sub-topics emerging from the articles.
+            4.  **FOCUS ON RELEVANCE:** Always keep the client's interest in mind. Only information directly relevant to this interest belongs in the summary.
 
-            **Core Principles of Analysis:**
-            1.  **Understand Temporal Relevance:** Interpret the user's intent with time in mind. A user asking about "election results" TODAY wants to know about current debates, not the outcome of the last election, unless it's relevant context for a current event.
-            2.  **Focus on NEW Developments:** Your client knows their field. Don't repeat static facts. Concentrate on what is evolving. Older articles can serve as context to explain current events, but the summary must prioritize the latest information.
-            3.  **Synthesize, Don't List:** Build a coherent narrative. Connect information from different articles to paint a complete picture of the current situation. Show how past events influence today's developments. For example: "Building on last week's decision to leave interest rates unchanged, the central bank has now signaled that future moves will depend on inflation data."
-            4. **Personalization and Learning:** Keep in mind that this is an ongoing conversation. Summaries will be built up from day to day. If a topic was already covered yesterday, provide an update today instead of re-introducing the topic.
-
-            **Briefing Structure:**
-            1.  **Main Headline:** A concise headline summarizing the top development of the day.
-            2.  **Introduction (1-2 sentences):** The most critical new findings, straight to the point.
-            3.  **Body:** Structure by the most important *new* topics. Each section gets a clear headline. Use older information to provide context (e.g., "Building on last week's decision, the government has now...").
-            
-            **Relevant Articles (sorted from new to old):**
+            **AVAILABLE ARTICLES:**
             ${content}
 
-            Now, create the development briefing for the client.
+            Now, create the synthesized briefing.
         `
     };
 
-    const prompt = (metaSummaryPrompts[language] || metaSummaryPrompts['de'])(user_intent, articleTexts, currentDate);
+    const prompt = (synthesisPrompts[language] || synthesisPrompts['de'])(user_intent, articleTexts, currentDate);
 
     try {
-        const summary = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
-        taskLogger.info(`Successfully generated meta summary.`);
+        // Using a more capable model for this complex task might be better.
+        const summary = await callGemini(prompt, 'gemini-2.5-flash', 0.4);
+        taskLogger.info(`Successfully generated synthesized summary.`);
         return summary;
     } catch (error) {
-        taskLogger.error('Error generating meta summary', error);
-        throw new Error(`Failed to generate meta summary: ${error.message}`);
+        taskLogger.error('Error generating synthesized summary', error);
+        throw new Error(`Failed to generate synthesized summary: ${error.message}`);
     }
 };
 
-const semanticCheckTask = async ({ data: { article, userTopic, language = 'de', currentDate } }) => {
-    taskLogger.info(`Performing semantic check for article "${article.title}" against topic "${userTopic.substring(0, 80)}"...`);
+const generateFollowUpAnswerTask = async ({ data: { question, chatHistory, summary, language = 'de' } }) => {
+    taskLogger.info(`Generating follow-up answer for question: "${question.substring(0, 50)}"...`);
 
-    const semanticCheckPrompts = {
-        'de': (topic, articleTitle, articleContent, date, article) => `
-            Du bist ein intelligenter Nachrichtenkurator. Deine Aufgabe ist es, mit Augenmaß zu beurteilen, ob ein Artikel für einen Nutzer basierend auf seinem Interesse relevant ist.
-            
-            **Nutzerinteresse:** "${topic}"
+    // Clean the history to be safe.
+    const cleanedHistory = (chatHistory || []).filter(entry =>
+        entry.parts && entry.parts.length > 0 && typeof entry.parts[0].text === 'string' && entry.parts[0].text.trim() !== ''
+    );
 
-            **Artikel:**
-            - **Titel:** "${articleTitle}"
-            - **Veröffentlicht am:** "${new Date(article.published_at).toLocaleDateString('de-DE')}"
-            - **Inhalt (Auszug):** "${articleContent.substring(0, 3000)}..."
+    // Format the history into a simple string for inclusion in the prompt.
+    const historyString = cleanedHistory.map(h => {
+        const prefix = h.role === 'user' ? 'Frage des Kunden' : 'Ihre Antwort';
+        return `${prefix}: ${h.parts.map(p => p.text).join('')}`;
+    }).join('\n\n');
 
-            **Deine Aufgabe:**
-            1.  **Kernrelevanz prüfen:** Verstehe die Kernabsicht des Nutzerinteresses. Leistet der Artikel einen wertvollen Beitrag zum Thema? Beleuchtet er Hintergründe, Debatten oder wichtige Zusammenhänge?
-            2.  **Kontext über Aktualität:** Ein Artikel muss nicht brandaktuell sein, um relevant zu sein. Ältere Artikel, die grundlegendes Wissen oder wichtigen, schwer zu findenden Kontext für aktuelle oder wiederkehrende Themen liefern, sind SEHR WERTVOLL.
-                *   **Beispiel:** Wenn das Interesse "Spannungen im Südchinesischen Meer" ist, ist ein detaillierter Analyse-Artikel von vor 6 Monaten, der die historischen Ansprüche erklärt, wahrscheinlich relevant.
-            3.  **FINALE ENTSCHEIDUNG:** Sei großzügig. Schließe einen Artikel NUR DANN aus, wenn er ZWEIFELSFREI und OFFENSICHTLICH irrelevant ist (z.B. völlig anderes Thema, eine reine Randnotiz, oder ein Event-Bericht, der durch neuere Ereignisse komplett überholt ist). Im Zweifel gilt der Artikel als relevant.
-            4.  **Begründung:** Gib eine kurze, klare Begründung für deine Entscheidung (1-2 Sätze).
+    const answerPrompts = {
+        'de': (question, history, summary) => `
+            Sie sind ein professioneller und hilfsbereiter KI-Analyst.
+            Ihre Aufgabe ist es, Folgefragen eines Kunden zu einem von Ihnen zuvor erstellten Briefing zu beantworten.
 
-            **ANTWORTE AUSSCHLIESSLICH MIT EINEM GÜLTIGEN JSON-OBJEKT im folgenden Format:**
-            { "is_relevant": <true oder false>, "reason": "<deine Begründung>" }
+            **Das ursprüngliche Briefing, das Sie bereitgestellt haben:**
+            ---
+            ${summary}
+            ---
+
+            **Bisheriger Gesprächsverlauf zu diesem Briefing (falls vorhanden):**
+            ---
+            ${history || 'Keine früheren Fragen in diesem Gespräch.'}
+            ---
+
+            **NEUE FRAGE DES KUNDEN:**
+            "${question}"
+
+            **IHRE ANWEISUNGEN:**
+            1.  Beantworten Sie die neue Frage des Kunden präzise und hilfreich.
+            2.  **Beziehen Sie sich explizit auf Informationen aus dem "ursprünglichen Briefing", wenn die Antwort dort zu finden ist.**
+            3.  Wenn das Briefing die Antwort nicht enthält, nutzen Sie Ihr breiteres Wissen, um die Frage bestmöglich zu beantworten.
+            4.  Antworten Sie auf Deutsch.
         `,
-        'en': (topic, articleTitle, articleContent, date, article) => `
-            You are an intelligent news curator. Your task is to judge with good judgment whether an article is relevant to a user based on their interest.
+        'en': (question, history, summary) => `
+            You are a professional and helpful AI analyst.
+            Your task is to answer follow-up questions from a client about a briefing you previously provided.
 
-            **User Interest:** "${topic}"
+            **The original briefing you provided:**
+            ---
+            ${summary}
+            ---
 
-            **Article:**
-            - **Title:** "${articleTitle}"
-            - **Published on:** "${new Date(article.published_at).toLocaleDateString('en-US')}"
-            - **Content (Excerpt):** "${articleContent.substring(0, 3000)}..."
+            **Previous conversation about this briefing (if any):**
+            ---
+            ${history || 'No prior questions in this conversation.'}
+            ---
 
-            **Your Task:**
-            1.  **Check Core Relevance:** Understand the core intent of the user's interest. Does the article make a valuable contribution to the topic? Does it illuminate background, debates, or important context?
-            2.  **Context Over Recency:** An article does not have to be brand new to be relevant. Older articles that provide foundational knowledge or important, hard-to-find context for current or recurring topics are VERY VALUABLE.
-                *   **Example:** If the interest is "tensions in the South China Sea," a detailed analysis article from 6 months ago explaining the historical claims is likely relevant.
-            3.  **FINAL DECISION:** Be generous. Exclude an article ONLY IF it is UNDOUBTEDLY and OBVIOUSLY irrelevant (e.g., a completely different topic, a mere side note, or an event report that is completely superseded by newer events). When in doubt, the article is considered relevant.
-            4.  **Reasoning:** Provide a short, clear reason for your decision (1-2 sentences).
+            **CLIENT'S NEW QUESTION:**
+            "${question}"
 
-            **RESPOND ONLY WITH A VALID JSON OBJECT in the following format:**
-            { "is_relevant": <true oder false>, "reason": "<your reason>" }
+            **YOUR INSTRUCTIONS:**
+            1.  Answer the client's new question accurately and helpfully.
+            2.  **Explicitly reference information from the "original briefing" if the answer can be found there.**
+            3.  If the briefing does not contain the answer, use your broader knowledge to answer the question as best as possible.
+            4.  Respond in English.
         `
     };
 
-    const prompt = (semanticCheckPrompts[language] || semanticCheckPrompts['de'])(userTopic, article.title, article.content, currentDate, article);
+    const prompt = (answerPrompts[language] || answerPrompts['de'])(question, historyString, summary);
 
     try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.2);
-        taskLogger.debug(`Raw AI semantic check response: ${responseString}`);
-
-        const jsonMatch = responseString.match(/\{.*\}/s);
-        if (!jsonMatch) throw new Error('No JSON object found in AI response for semantic check.');
-        
-        const result = JSON.parse(jsonMatch[0]);
-        if (typeof result.is_relevant !== 'boolean' || typeof result.reason !== 'string') {
-            throw new Error('Invalid JSON structure in AI response for semantic check.');
-        }
-
-        taskLogger.info(`Semantic check for article "${article.title}" complete. Relevant: ${result.is_relevant}`);
-        return result;
-
+        // Use the simple, robust callGemini function, following the pattern of working tasks.
+        const answer = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
+        taskLogger.info(`Successfully generated follow-up answer.`);
+        return answer;
     } catch (error) {
-        taskLogger.error(`Error during semantic check for article "${article.title}"`, error);
-        // In case of error, default to not relevant to avoid showing bad content.
-        return { is_relevant: false, reason: `Error during analysis: ${error.message}` };
+        taskLogger.error('Error generating follow-up answer', error);
+        throw new Error(`Failed to generate follow-up answer: ${error.message}`);
     }
 };
 
-module.exports = { headlineCheckTask, semanticCheckTask, orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask };
+module.exports = { orchestrateChatTask, generateSearchQueriesTask, generateSynthesizedSummaryTask, generateFollowUpAnswerTask };

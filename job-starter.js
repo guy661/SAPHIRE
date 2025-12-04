@@ -15,7 +15,7 @@ const parser = new Parser();
 // This function is now self-contained and can be imported anywhere.
 async function startSearchJob(dashboardId, userId, rssCategories = []) {
     const queuesModule = await import('./queues.mjs');
-    const fetchQueue = queuesModule.default.fetchQueue;
+    const { synthesisQueue } = queuesModule.default;
 
     const dashboard = await db.getDashboardById(dashboardId);
     if (!dashboard || dashboard.user_id !== userId) {
@@ -88,22 +88,23 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
     jobLogger.info(`Found a total of ${articlesToCheck.length} unique articles from all sources.`);
 
     if (articlesToCheck.length === 0) {
+        jobLogger.info(`No articles found for dashboard ${dashboardId}. Job not created.`);
         return null;
     }
 
     const jobId = randomUUID();
     await db.createJob(jobId, dashboardId, 'processing');
 
-    for (const article of articlesToCheck) {
-        const jobArticle = await db.createJobArticle(jobId, article);
-        await fetchQueue.add('fetch', {
-            articleId: jobArticle.id,
-            url: jobArticle.link,
-            dashboardId: dashboardId
-        });
-    }
+    // NEW: Add a single job to the synthesis queue with all articles
+    await synthesisQueue.add('synthesize', {
+        jobId: jobId,
+        dashboardId: dashboardId,
+        articles: articlesToCheck,
+        user_intent: dashboard.user_intent,
+        language: user.language || 'de'
+    });
 
-    jobLogger.info(`Job ${jobId} created. Queued ${articlesToCheck.length} articles for dashboard ${dashboardId}.`);
+    jobLogger.info(`Job ${jobId} created. Queued a synthesis task with ${articlesToCheck.length} articles for dashboard ${dashboardId}.`);
     return jobId;
 }
 

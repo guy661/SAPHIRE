@@ -10,7 +10,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
 const { Logger, EMOJIS } = require('./utils.js');
-const { orchestrateChatTask, generateSearchQueriesTask, generateMetaSummaryTask } = require('./task.js');
+const { orchestrateChatTask, generateSearchQueriesTask, generateFollowUpAnswerTask } = require('./task.js');
 
 const serverLogger = new Logger('Server', 'green', EMOJIS.server);
 
@@ -158,6 +158,23 @@ async function main() {
         }
     });
 
+    app.get('/api/dashboards/:id/jobs', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        try {
+            // First, verify the dashboard belongs to the user
+            const dashboard = await db.getDashboardById(parseInt(id, 10));
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(404).json({ error: "Dashboard not found or access denied" });
+            }
+            // If authorized, fetch the jobs
+            const jobs = await db.getJobsByDashboardId(id);
+            res.json(jobs);
+        } catch (error) {
+            serverLogger.error(`Error fetching jobs for dashboard ${id}:`, error);
+            res.status(500).json({ error: 'Failed to fetch jobs' });
+        }
+    });
+
     app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
         const { id } = req.params;
         const { name, interval_minutes, summary_style, is_active } = req.body;
@@ -261,51 +278,51 @@ async function main() {
         const { id } = req.params;
         try {
             const job = await db.getJob(id);
-            if (!job) return res.status(200).json({ status: 'pending', articles: [] });
+            if (!job) return res.status(404).json({ status: 'not_found' });
             
+            // Authorization Check
             const dashboard = await db.getDashboardById(job.dashboard_id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
                 return res.status(403).json({ error: "Forbidden" });
             }
 
-            const allArticles = await db.getJobArticles(id);
-            const isProcessingComplete = !allArticles.some(a => ['pending', 'processing'].includes(a.status));
-
-            // If processing is done, and we haven't generated a summary yet.
-            if (isProcessingComplete && job.status === 'processing') {
-                serverLogger.info(`Job ${id} finished processing articles. Generating meta summary...`);
-                await db.updateJobStatus(id, 'generating_summary');
-                job.status = 'generating_summary';
-
-                const relevantArticles = allArticles.filter(a => a.is_relevant === true);
-                serverLogger.info(`Found ${relevantArticles.length} relevant articles for summary.`);
-
-                let summary = 'No relevant articles found to generate a summary.';
-                if (relevantArticles.length > 0) {
-                    const user = await db.getUserById(dashboard.user_id);
-                    summary = await generateMetaSummaryTask({
-                        data: {
-                            articles: relevantArticles,
-                            user_intent: dashboard.user_intent,
-                            language: user.language || 'de',
-                            currentDate: new Date().toLocaleDateString('de-DE')
-                        }
-                    });
-                }
-                
-                await db.updateJobMetaSummary(id, summary);
-                await db.updateJobStatus(id, 'completed');
-                job.meta_summary = summary;
-                job.status = 'completed';
-            }
-
-            const completedArticles = allArticles.filter(a => a.status === 'completed');
-            res.json({ status: job.status, summary: job.meta_summary, articles: completedArticles });
+            // The new synthesis worker handles all processing, so we just return the job from the DB.
+            res.json({ status: job.status, summary: job.meta_summary });
 
         } catch (err) {
             serverLogger.error(`Error fetching results for job ${id}:`, err);
-            await db.updateJobStatus(id, 'failed').catch(e => serverLogger.error('Failed to update job status on error:', e));
             res.status(500).json({ error: "Error fetching job results" });
+        }
+    });
+
+    app.post("/api/jobs/:jobId/chat", isAuthenticated, async (req, res) => {
+        const { jobId } = req.params;
+        const { message, chatHistory, summary } = req.body;
+
+        try {
+            // Authorization: Check if the job belongs to the user
+            const job = await db.getJob(jobId);
+            if (!job) return res.status(404).json({ error: "Job not found" });
+
+            const dashboard = await db.getDashboardById(job.dashboard_id);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+
+            const answer = await generateFollowUpAnswerTask({
+                data: {
+                    question: message,
+                    chatHistory: chatHistory || [],
+                    summary: summary,
+                    language: req.session.language || 'de'
+                }
+            });
+
+            res.json({ answer });
+
+        } catch (error) {
+            serverLogger.error(`Error in chat for job ${jobId}:`, error);
+            res.status(500).json({ error: 'Failed to get answer from AI' });
         }
     });
 
