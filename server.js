@@ -10,7 +10,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
 const { Logger, EMOJIS } = require('./utils.js');
-const { orchestrateChatTask, generateSearchQueriesTask, generateFollowUpAnswerTask } = require('./task.js');
+const { orchestrateChatTask, generateSearchQueriesTask, generateFollowUpAnswerTask, selectCategoriesTask, generateGeneralKeywordsTask } = require('./task.js');
 
 const serverLogger = new Logger('Server', 'green', EMOJIS.server);
 
@@ -62,101 +62,76 @@ async function main() {
     
     const { startSearchJob } = require('./job-starter.js');
     const { getFeedCategories } = require('./rss-aggregator.js');
-    const { tts } = require('node-edge-tts');
-    const { Readable } = require('stream');
+    const { EdgeTTS } = require('node-edge-tts'); // Correct import
+    const fs = require('fs'); // Needs standard fs for streams
 
-    // AUTHENTICATION ROUTES
-    app.post('/api/login', async (req, res) => {
-        const { username, password } = req.body;
-        if (!username || !password) return res.status(400).json({ error: 'Username and password are required' });
-        try {
-            const user = await db.getUserByUsername(username);
-            if (!user) return res.status(401).json({ error: 'Invalid credentials' });
-            const isValidPassword = await bcrypt.compare(password, user.password);
-            if (!isValidPassword) return res.status(401).json({ error: 'Invalid credentials' });
-            req.session.userId = user.id;
-            req.session.username = user.username;
-            serverLogger.info(`User ${username} logged in successfully.`);
-            res.status(200).json({ message: 'Logged in successfully', username: user.username, userId: user.id });
-        } catch (error) {
-            serverLogger.error('Login error:', error);
-            res.status(500).json({ error: 'An error occurred during login' });
-        }
-    });
-
-    app.post('/api/logout', isAuthenticated, (req, res) => {
-        req.session.destroy(err => {
-            if (err) {
-                serverLogger.error('Logout error:', err);
-                return res.status(500).json({ error: 'Failed to log out' });
-            }
-            res.clearCookie('sid');
-            res.status(200).json({ message: 'Logged out successfully' });
-        });
-    });
-
-    app.post('/api/register', async (req, res) => {
-        const { username, password, language } = req.body;
-        if (!username || !password || !language) return res.status(400).json({ error: 'Username, password, and language are required' });
-        try {
-            const newUser = await db.createUser(username, password, language);
-            req.session.userId = newUser.id;
-            req.session.username = newUser.username;
-            req.session.language = newUser.language;
-            serverLogger.info(`New user registered: ${username}`);
-            res.status(201).json({ message: 'User created successfully', userId: newUser.id, username: newUser.username, language: newUser.language });
-        } catch (error) {
-            if (error.code === '23505') {
-                res.status(409).json({ error: 'Username already exists' });
-            } else {
-                serverLogger.error('Registration error:', error);
-                res.status(500).json({ error: 'An error occurred during registration' });
-            }
-        }
-    });
-
-    app.get('/api/user', (req, res) => {
-        if (req.session.userId && req.session.username) {
-            res.status(200).json({ userId: req.session.userId, username: req.session.username, language: req.session.language });
-        } else {
-            res.status(401).json({ error: 'Not authenticated' });
-        }
-    });
-    
     // --- AUDIO API ---
     app.get('/api/audio-summary', isAuthenticated, async (req, res) => {
-        serverLogger.info(`Audio summary requested for user ${req.session.userId}`);
+        const { jobId } = req.query;
+        serverLogger.info(`Audio summary requested for user ${req.session.userId}. JobID: ${jobId || 'latest'}`);
         
-        let textToSpeak = "Es konnten keine Nachrichten zum Vorlesen gefunden werden. Bitte führen Sie zuerst eine Suche in einem Ihrer Dashboards durch.";
+        let textToSpeak = "Es konnten keine Nachrichten zum Vorlesen gefunden werden.";
 
         try {
-            // 1. Find the most recent dashboard for the user
-            const dashboards = await db.getDashboardsByUserId(req.session.userId);
-            if (dashboards.length > 0) {
-                // For simplicity, we'll use the most recently created dashboard.
-                const latestDashboard = dashboards[0];
-                
-                // 2. Find the last completed job for that dashboard
-                const lastJob = await db.getLatestCompletedJobForDashboard(latestDashboard.id);
-
-                if (lastJob && lastJob.meta_summary) {
-                    // 3. Use its meta summary as the text
-                    textToSpeak = `Ihr persönliches Briefing für das Dashboard ${latestDashboard.name}: \n\n ${lastJob.meta_summary}`;
+            if (jobId) {
+                const job = await db.getJob(jobId);
+                if (job) {
+                    const dashboard = await db.getDashboardById(job.dashboard_id);
+                    if (dashboard && dashboard.user_id === req.session.userId) {
+                        if (job.meta_summary) {
+                            textToSpeak = `Hier ist Ihre Zusammenfassung: \n\n ${job.meta_summary}`;
+                        } else {
+                            textToSpeak = "Für diesen Auftrag wurde keine Zusammenfassung generiert.";
+                        }
+                    } else {
+                        return res.status(403).json({ error: "Forbidden" });
+                    }
                 } else {
-                    textToSpeak = `Für Ihr Dashboard "${latestDashboard.name}" wurde noch kein Nachrichten-Briefing erstellt.`;
+                    return res.status(404).json({ error: "Job not found" });
+                }
+            } else {
+                // Fallback: Find the most recent dashboard/job
+                const dashboards = await db.getDashboardsByUserId(req.session.userId);
+                if (dashboards.length > 0) {
+                    const latestDashboard = dashboards[0];
+                    const lastJob = await db.getLatestCompletedJobForDashboard(latestDashboard.id);
+
+                    if (lastJob && lastJob.meta_summary) {
+                        textToSpeak = `Ihr persönliches Briefing für das Dashboard ${latestDashboard.name}: \n\n ${lastJob.meta_summary}`;
+                    } else {
+                        textToSpeak = `Für Ihr Dashboard "${latestDashboard.name}" wurde noch kein Nachrichten-Briefing erstellt.`;
+                    }
                 }
             }
 
-            const audioStream = await tts(textToSpeak, { voice: 'de-DE-KatjaNeural' });
+            // Clean up markdown for speech (simple approach)
+            const cleanText = textToSpeak
+                .replace(/[*_#`]/g, '') // Remove markdown chars
+                .replace(/https?:\/\/\S+/g, 'Link') // Replace URLs
+                .replace(/\n\n/g, '. ') // Replace double newlines with pauses
+                .substring(0, 4500); // Limit length for TTS safety
+
+            const tempFilePath = path.join(__dirname, `tts-${randomUUID()}.mp3`);
+            const tts = new EdgeTTS({ voice: 'de-DE-KatjaNeural' });
+            
+            await tts.ttsPromise(cleanText, tempFilePath);
             
             res.setHeader('Content-Type', 'audio/mpeg');
+            
+            const stream = fs.createReadStream(tempFilePath);
+            stream.pipe(res);
 
-            const readable = Readable.from(audioStream);
-            readable.pipe(res);
+            stream.on('close', () => {
+                fs.unlink(tempFilePath, (err) => {
+                    if (err) serverLogger.warn(`Failed to delete temp TTS file: ${tempFilePath}`);
+                });
+            });
 
         } catch (error) {
             serverLogger.error('TTS Generation Error:', error);
-            res.status(500).json({ error: 'Failed to generate audio summary.' });
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Failed to generate audio summary.' });
+            }
         }
     });
 
@@ -250,11 +225,20 @@ async function main() {
 
     app.post("/api/dashboards/:id/run-search", isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        const { rss_categories = [] } = req.body; // Expects an array of category keys
+        let { rss_categories = [] } = req.body; 
 
-        // serverLogger.info(`/api/dashboards/${id}/run-search POST route started for user ${req.session.userId}`);
-        
         try {
+            const dashboard = await db.getDashboardById(parseInt(id, 10));
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+
+            // Use saved categories if none provided by frontend
+            if (rss_categories.length === 0 && dashboard.selected_categories && dashboard.selected_categories.length > 0) {
+                rss_categories = dashboard.selected_categories;
+                serverLogger.info(`Using saved categories for search: ${rss_categories.join(', ')}`);
+            }
+
             const jobId = await startSearchJob(parseInt(id, 10), req.session.userId, rss_categories);
             if (!jobId) {
                 return res.status(200).json({ jobId: null, message: "No articles found for this dashboard's topic." });
@@ -302,6 +286,47 @@ async function main() {
                 res.json({ message: result.message, suggestions: result.suggestions || [] });
             } else if (result.action === 'save') {
                 await db.updateDashboardTopic(dashboardId, result.data.user_intent);
+                
+                // --- NEW: AI Category Selection ---
+                try {
+                    const allCategories = await getFeedCategories();
+                    const selectedCategoryKeys = await selectCategoriesTask({
+                        data: {
+                            user_intent: result.data.user_intent,
+                            categories: allCategories,
+                            language: req.session.language || 'de'
+                        }
+                    });
+
+                    if (selectedCategoryKeys && selectedCategoryKeys.length > 0) {
+                        await db.updateDashboardCategories(dashboardId, selectedCategoryKeys);
+                        serverLogger.info(`AI selected categories for dashboard ${dashboardId}: ${selectedCategoryKeys.join(', ')}`);
+                    } else {
+                        serverLogger.warn(`AI selected NO categories for dashboard ${dashboardId}. Defaulting to none (or all/logic dependent).`);
+                    }
+
+                    // --- NEW: AI Keyword Generation for Pre-filtering ---
+                    const keywords = await generateGeneralKeywordsTask({
+                        data: {
+                            user_intent: result.data.user_intent,
+                            language: req.session.language || 'de'
+                        }
+                    });
+                    
+                    if (keywords && keywords.length > 0) {
+                        await db.updateDashboardSearchTerms(dashboardId, keywords);
+                        serverLogger.info(`AI generated search terms for dashboard ${dashboardId}: ${keywords.join(', ')}`);
+                    } else {
+                        serverLogger.warn(`AI generated NO search terms for dashboard ${dashboardId}.`);
+                    }
+                    // ----------------------------------------------------
+
+                } catch (catError) {
+                    serverLogger.error('Error during AI category/keyword selection:', catError);
+                    // Non-critical: proceed without crashing, user just gets default behavior
+                }
+                // ----------------------------------
+
                 req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
                 res.json({ message: result.message, isDone: true });
                 delete req.session.chatHistory; 

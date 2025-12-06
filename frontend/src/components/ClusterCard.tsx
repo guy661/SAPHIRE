@@ -1,7 +1,9 @@
 import { Typography, Box, Accordion, AccordionSummary, AccordionDetails, List, ListItem, Link, Chip } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import InteractiveCard from './InteractiveCard';
-import { Biases, Mood, Folder } from '@phosphor-icons/react';
+import SentimentNeutralIcon from '@mui/icons-material/SentimentNeutral';
+import BalanceIcon from '@mui/icons-material/Balance';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import { submitFeedback } from '../services/api';
 import { useState } from 'react';
 import ThumbUpIcon from '@mui/icons-material/ThumbUp';
@@ -88,9 +90,9 @@ export default function ClusterCard({ cluster }: ClusterCardProps) {
           )}
 
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2, alignItems: 'center' }}>
-             {cluster.sentiment && <Chip icon={<Mood />} label={cluster.sentiment} size="small" color={sentimentColor(cluster.sentiment)} />}
-            {cluster.focus && <Chip icon={<Folder />} label={cluster.focus} size="small" variant="outlined" />}
-            {cluster.bias && <Chip icon={<Biases />} label={cluster.bias} size="small" variant="outlined" />}
+             {cluster.sentiment && <Chip icon={<SentimentNeutralIcon />} label={cluster.sentiment} size="small" color={sentimentColor(cluster.sentiment)} />}
+            {cluster.focus && <Chip icon={<FolderOpenIcon />} label={cluster.focus} size="small" variant="outlined" />}
+            {cluster.bias && <Chip icon={<BalanceIcon />} label={cluster.bias} size="small" variant="outlined" />}
              <Box sx={{height: '20px', width: '1px', background: 'divider', mx: 1}} />
             {sources.map(source => (
               <Chip key={source} label={source} size="small" />

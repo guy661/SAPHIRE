@@ -49,6 +49,22 @@ async function updateDashboardTopic(dashboardId, userIntent) {
     return res.rows[0];
 }
 
+async function updateDashboardCategories(dashboardId, categories) {
+    const res = await pool.query(
+        'UPDATE dashboards SET selected_categories = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+        [JSON.stringify(categories), dashboardId]
+    );
+    return res.rows[0];
+}
+
+async function updateDashboardSearchTerms(dashboardId, searchTerms) {
+    const res = await pool.query(
+        'UPDATE dashboards SET search_terms = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *',
+        [JSON.stringify(searchTerms), dashboardId]
+    );
+    return res.rows[0];
+}
+
 async function updateDashboardSettings(dashboardId, { name, interval_minutes, summary_style, is_active }) {
     const current = await getDashboardById(dashboardId);
     const newSettings = {
@@ -174,8 +190,7 @@ async function getClustersByJobId(jobId, userId) {
 
         LEFT JOIN user_feedback uf ON c.id = uf.cluster_id AND uf.user_id = $2
 
-        WHERE a.job_id = 
-
+        WHERE a.job_id = $1
 
         GROUP BY c.id, c.representative_title, c.summary, c.sentiment, c.focus, c.bias, c.created_at, uf.feedback_type
 
@@ -276,5 +291,8 @@ module.exports = {
     getUserFeedback,
     getFeedbackAndHistory,
     getClusterTitlesByIds,
-    deleteUserFeedback, // <-- Add this
+    deleteUserFeedback,
+    updateDashboardCategories,
+    updateDashboardSearchTerms,
+    getClustersByJobId
 };

@@ -144,6 +144,11 @@ const synthesisWorker = new BullMQWorker('synthesis', async (job) => {
         // NEW: Get user feedback and history context
         const { userId, dashboardId } = job.data;
         const userContext = await db.getFeedbackAndHistory(userId, dashboardId);
+        
+        // NEW: Get the full summary text of the last completed job for context
+        const lastJob = await db.getLatestCompletedJobForDashboard(dashboardId);
+        const previousSummary = lastJob ? lastJob.meta_summary : null;
+
         // synthesisLogger.info(`Context for user ${userId}: ${userContext.likedClusterIds.length} likes, ${userContext.dislikedClusterIds.length} dislikes, ${userContext.previousClusterIds.length} previous clusters.`);
 
         // Adapt cluster summaries to the format expected by generateSynthesizedSummaryTask
@@ -165,6 +170,7 @@ const synthesisWorker = new BullMQWorker('synthesis', async (job) => {
                 currentDate: new Date().toLocaleDateString('de-DE'),
                 // Pass the new context to the task
                 userContext,
+                previousSummary // Pass the text of the last summary
             }
         });
         await db.updateJobMetaSummary(jobId, metaSummary);

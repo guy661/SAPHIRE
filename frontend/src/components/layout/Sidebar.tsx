@@ -6,7 +6,7 @@ import {
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useNavigate } from 'react-router-dom';
 import { useEffect, useState } from 'react';
 import { getDashboards, createDashboard } from '../../services/api';
 
@@ -17,6 +17,7 @@ interface SidebarContentProps {
 
 export default function SidebarContent({ open, toggleDrawer }: SidebarContentProps) {
     const theme = useTheme();
+    const navigate = useNavigate();
     const [dashboards, setDashboards] = useState<any[]>([]);
     const [isDialogOpen, setDialogOpen] = useState(false);
     
@@ -34,6 +35,8 @@ export default function SidebarContent({ open, toggleDrawer }: SidebarContentPro
             const newDashboard = await createDashboard(dashboardName);
             setDashboards(prev => [...prev, newDashboard]);
             setDialogOpen(false);
+            // Auto-navigate to onboarding chat
+            navigate(`/dashboard/${newDashboard.id}/edit?onboarding=true`);
         } catch (err) {
             console.error(err);
         }

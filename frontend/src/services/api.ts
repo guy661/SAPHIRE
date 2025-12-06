@@ -1,11 +1,9 @@
 const API_BASE_URL = 'http://localhost:3001/api';
 
 // Helper for handling API responses
-async function handleResponse(response) {
+async function handleResponse(response: Response) {
     if (!response.ok) {
         if (response.status === 401) {
-            // This could be a session timeout. The router should handle the redirect.
-            // Returning a specific error or an empty object might be useful.
             throw new Error('Unauthorized');
         }
         const data = await response.json().catch(() => ({ error: 'Invalid JSON response' }));
@@ -14,8 +12,22 @@ async function handleResponse(response) {
     return response.json();
 }
 
+// Wrapper for fetch that always includes credentials
+async function fetchWithAuth(url: string, options: RequestInit = {}) {
+    const defaultOptions: RequestInit = {
+        credentials: 'include', // CRITICAL for sending cookies across origins (port 5173 -> 3001)
+    };
+    
+    // Merge headers correctly
+    const headers = {
+        ...(options.headers || {}),
+    };
+
+    return fetch(url, { ...defaultOptions, ...options, headers });
+}
+
 export async function loginUser(username, password) {
-  const response = await fetch(`${API_BASE_URL}/login`, {
+  const response = await fetchWithAuth(`${API_BASE_URL}/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
@@ -23,21 +35,34 @@ export async function loginUser(username, password) {
   return handleResponse(response);
 }
 
+export async function registerUser(username, password, language) {
+    const response = await fetchWithAuth(`${API_BASE_URL}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password, language }),
+    });
+    return handleResponse(response);
+}
+
 export async function logoutUser() {
-  await fetch(`${API_BASE_URL}/logout`, { method: 'POST' });
+  await fetchWithAuth(`${API_BASE_URL}/logout`, { method: 'POST' });
+}
+
+export async function getCurrentUser() {
+    const response = await fetchWithAuth(`${API_BASE_URL}/user`);
+    return handleResponse(response);
 }
 
 export async function getDashboards() {
-  const response = await fetch(`${API_BASE_URL}/dashboards`);
+  const response = await fetchWithAuth(`${API_BASE_URL}/dashboards`);
   return handleResponse(response).catch(err => {
-      // For this specific case, we return an empty array to prevent UI crashes on 401
       if (err.message === 'Unauthorized') return [];
       throw err;
   });
 }
 
 export async function createDashboard(name: string) {
-  const response = await fetch(`${API_BASE_URL}/dashboards`, {
+  const response = await fetchWithAuth(`${API_BASE_URL}/dashboards`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
@@ -46,17 +71,17 @@ export async function createDashboard(name: string) {
 }
 
 export async function getDashboardById(id: string) {
-    const response = await fetch(`${API_BASE_URL}/dashboards/${id}`);
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}`);
     return handleResponse(response);
 }
 
 export async function getDashboardJobs(id: string) {
-    const response = await fetch(`${API_BASE_URL}/dashboards/${id}/jobs`);
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}/jobs`);
     return handleResponse(response);
 }
 
 export async function runDashboardSearch(id: string, rssCategories: string[]) {
-    const response = await fetch(`${API_BASE_URL}/dashboards/${id}/run-search`, {
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}/run-search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ rss_categories: rssCategories }),
@@ -65,17 +90,17 @@ export async function runDashboardSearch(id: string, rssCategories: string[]) {
 }
 
 export async function getJobStatus(jobId: string) {
-    const response = await fetch(`${API_BASE_URL}/job/${jobId}`);
+    const response = await fetchWithAuth(`${API_BASE_URL}/job/${jobId}`);
     return handleResponse(response);
 }
 
 export async function getJobClusters(jobId: string) {
-    const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/clusters`);
+    const response = await fetchWithAuth(`${API_BASE_URL}/jobs/${jobId}/clusters`);
     return handleResponse(response);
 }
 
 export async function postJobChat(jobId: string, message: string, chatHistory: any[], summary: string) {
-    const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/chat`, {
+    const response = await fetchWithAuth(`${API_BASE_URL}/jobs/${jobId}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message, chatHistory, summary }),
@@ -84,7 +109,7 @@ export async function postJobChat(jobId: string, message: string, chatHistory: a
 }
 
 export async function runPersonalizationChat(dashboardId: string, message: string) {
-    const response = await fetch(`${API_BASE_URL}/dashboards/${dashboardId}/personalization-chat`, {
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${dashboardId}/personalization-chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
@@ -93,15 +118,24 @@ export async function runPersonalizationChat(dashboardId: string, message: strin
 }
 
 export async function getAvailableRssCategories() {
-    const response = await fetch(`${API_BASE_URL}/rss/categories`);
+    const response = await fetchWithAuth(`${API_BASE_URL}/rss/categories`);
     return handleResponse(response);
 }
 
 export async function submitFeedback(clusterId: number, feedbackType: 'like' | 'dislike' | null) {
-    const response = await fetch(`${API_BASE_URL}/feedback`, {
+    const response = await fetchWithAuth(`${API_BASE_URL}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ clusterId, feedbackType }),
+    });
+    return handleResponse(response);
+}
+
+export async function updateDashboardSettings(id: string, settings: { summary_style?: string, interval_minutes?: number, is_active?: boolean }) {
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
     });
     return handleResponse(response);
 }

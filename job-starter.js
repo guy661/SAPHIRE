@@ -2,7 +2,7 @@
 require('dotenv').config();
 
 const db = require('./database-postgres.js');
-const { generateSearchQueriesTask } = require('./task.js');
+const { generateSearchQueriesTask, generateGeneralKeywordsTask } = require('./task.js');
 const { getAggregatedFeed } = require('./rss-aggregator.js');
 const { randomUUID } = require('crypto');
 const fetch = require('node-fetch');
@@ -28,11 +28,56 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
     jobLogger.info(`Starting combined search job for dashboard ${dashboardId}. RSS Categories: [${rssCategories.join(', ')}]`);
     const user = await db.getUserById(userId);
 
+    // Determine the "since" date for filtering
+    const lastJob = await db.getLatestCompletedJobForDashboard(dashboardId);
+    let minDate = null;
+    if (lastJob) {
+        minDate = lastJob.created_at;
+        jobLogger.info(`Found previous job from ${minDate}. Filtering articles older than this.`);
+    } else {
+        // Default to 48 hours ago if no previous job
+        const d = new Date();
+        d.setHours(d.getHours() - 48);
+        minDate = d;
+        jobLogger.info(`No previous job found. Filtering articles older than 48 hours (${minDate}).`);
+    }
+
+    // Determine search terms (use stored ones if available, otherwise generate and save)
+    let storedSearchTerms = dashboard.search_terms && Array.isArray(dashboard.search_terms) ? dashboard.search_terms : [];
+    
+    if (storedSearchTerms.length === 0) {
+        jobLogger.info(`No stored search terms found. Generating new ones via AI...`);
+        try {
+            storedSearchTerms = await generateGeneralKeywordsTask({ 
+                data: { user_intent: dashboard.user_intent, language: user.language || 'de' } 
+            });
+            
+            if (storedSearchTerms.length > 0) {
+                await db.updateDashboardSearchTerms(dashboardId, storedSearchTerms);
+                jobLogger.info(`Generated and saved new search terms: [${storedSearchTerms.join(', ')}]`);
+            } else {
+                jobLogger.warn(`AI failed to generate search terms.`);
+            }
+        } catch (err) {
+            jobLogger.error(`Error generating search terms: ${err.message}`);
+        }
+    } else {
+        jobLogger.info(`Using stored search terms for pre-filtering: [${storedSearchTerms.join(', ')}]`);
+    }
+
     // --- Google News Search Promise ---
     const googleNewsPromise = async () => {
-        // jobLogger.info('Generating smart search queries from user intent...');
-        const searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' } });
-        // jobLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
+        let searchQueries = [];
+        
+        // Use stored terms if available (now they should be), otherwise fallback to complex query generation
+        if (storedSearchTerms.length > 0) {
+             searchQueries = storedSearchTerms;
+        } else {
+             // Fallback if generation above failed completely
+             // jobLogger.info('Generating smart search queries from user intent...');
+             searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' } });
+             // jobLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
+        }
 
         const googleArticles = new Map();
         for (const query of searchQueries) {
@@ -51,6 +96,11 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
                 const xml = await response.text();
                 const feed = await parser.parseString(xml);
                 feed.items.slice(0, 10).forEach(article => {
+                    // Additional date check for Google News items
+                    if (minDate && article.pubDate && new Date(article.pubDate) <= new Date(minDate)) {
+                        return;
+                    }
+
                     if (article.link && !googleArticles.has(article.link)) {
                         // Add the source name for Google News articles
                         article.sourceName = 'Google News';
@@ -68,7 +118,8 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
     const customRssPromise = async () => {
         // The aggregator itself will handle the case of an empty category array by fetching all feeds.
         // jobLogger.info(`Performing custom RSS search for categories: [${rssCategories.join(', ')}]`);
-        return getAggregatedFeed(rssCategories);
+        // Pass the ensured storedSearchTerms
+        return getAggregatedFeed(rssCategories, minDate, storedSearchTerms);
     };
 
     // --- Execute and Combine with Priority ---

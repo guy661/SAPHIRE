@@ -1,4 +1,4 @@
-import { useParams, Link as RouterLink, useNavigate } from 'react-router-dom';
+import { useParams, Link as RouterLink, useNavigate, useLocation } from 'react-router-dom';
 import { Box, TextField, Button, Paper, List, ListItem, ListItemText, Typography, Container, CircularProgress } from '@mui/material';
 import { useState } from 'react';
 import { runPersonalizationChat } from '../services/api';
@@ -11,6 +11,7 @@ interface Message {
 export default function ChatPage() {
     const { dashboardId } = useParams<{ dashboardId: string }>();
     const navigate = useNavigate();
+    const location = useLocation();
     const [messages, setMessages] = useState<Message[]>([
         { sender: 'model', text: 'Worum soll es in diesem Dashboard gehen? Beschreiben Sie Ihr Interessensgebiet.' },
     ]);
@@ -31,9 +32,18 @@ export default function ChatPage() {
                 const modelMessage: Message = { sender: 'model', text: response.message };
                 setMessages(prev => [...prev, modelMessage]);
 
-                // If the backend indicates the process is done, navigate back to the main dashboard page
+                // If the backend indicates the process is done, navigate based on context
                 if (response.isDone) {
-                    setTimeout(() => navigate('/'), 2000);
+                    const params = new URLSearchParams(location.search);
+                    const isOnboarding = params.get('onboarding') === 'true';
+                    
+                    setTimeout(() => {
+                        if (isOnboarding) {
+                            navigate(`/dashboard/${dashboardId}/settings`);
+                        } else {
+                            navigate(`/dashboard/${dashboardId}`);
+                        }
+                    }, 1500);
                 }
 
             } catch (error) {

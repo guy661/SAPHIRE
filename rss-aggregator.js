@@ -30,7 +30,7 @@ const axios = require('axios');
 async function fetchAndParseFeed(feedConfig) {
   const { name, url } = feedConfig;
   try {
-    // aggregatorLogger.info(`Fetching custom RSS feed: ${name} (${url})`);
+    aggregatorLogger.info(`Fetching feed: ${name} ...`);
 
     // 1. Abrufen mit echten Browser-Headern & SSL-Toleranz
     const response = await axios.get(url, {
@@ -65,16 +65,17 @@ async function fetchAndParseFeed(feedConfig) {
     items.forEach(item => {
       item.sourceName = name;
     });
+    aggregatorLogger.info(`Fetched ${items.length} items from ${name}`);
     return items;
 
   } catch (error) {
     // Fehlerbehandlung: DNS-Fehler (ENOTFOUND) und 404 sind "normal" bei toten Feeds
     if (error.code === 'ENOTFOUND') {
-        // aggregatorLogger.warn(`DNS Error for ${url}: Host not found.`);
+        aggregatorLogger.warn(`DNS Error for ${url}: Host not found.`);
     } else if (error.response && error.response.status === 404) {
-        // aggregatorLogger.warn(`Feed not found (404): ${url}`);
+        aggregatorLogger.warn(`Feed not found (404): ${url}`);
     } else if (error.response && error.response.status === 403) {
-        // aggregatorLogger.warn(`Access denied (403) for ${url} - checking headers might help.`);
+        aggregatorLogger.warn(`Access denied (403) for ${url} - checking headers might help.`);
     } else {
         // XML Fehler loggen, aber nicht crashen
         aggregatorLogger.warn(`Error processing feed ${name}: ${error.message}`);
@@ -83,7 +84,7 @@ async function fetchAndParseFeed(feedConfig) {
   }
 }
 
-async function getAggregatedFeed(categories = []) {
+async function getAggregatedFeed(categories = [], minDate = null, keywords = []) {
   // aggregatorLogger.info(`Aggregator called with categories: [${categories.join(', ')}]`);
   const allCategories = await getFeedCategories();
   let feedsToFetch = [];
@@ -103,7 +104,7 @@ async function getAggregatedFeed(categories = []) {
     }
   }
 
-  // aggregatorLogger.info(`Found ${feedsToFetch.length} feeds to fetch in total.`);
+  aggregatorLogger.info(`Preparing to fetch ${feedsToFetch.length} feeds.`);
   if (feedsToFetch.length === 0) {
     return [];
   }
@@ -111,10 +112,45 @@ async function getAggregatedFeed(categories = []) {
   const feedPromises = feedsToFetch.map(feed => fetchAndParseFeed(feed));
   const allItems = await Promise.all(feedPromises);
   const flattenedItems = allItems.flat();
-  // aggregatorLogger.info(`Total items fetched from all feeds: ${flattenedItems.length}`);
+  aggregatorLogger.info(`Total raw items fetched: ${flattenedItems.length}`);
+
+  // Filter by date if minDate is provided
+  let filteredItems = flattenedItems;
+  if (minDate) {
+      const thresholdDate = new Date(minDate);
+      filteredItems = flattenedItems.filter(item => {
+          if (!item.pubDate) return false;
+          try {
+              return new Date(item.pubDate) > thresholdDate;
+          } catch (e) {
+              return false;
+          }
+      });
+      aggregatorLogger.info(`Date filtering: kept ${filteredItems.length} items newer than ${minDate}`);
+  }
+
+  // Filter by keywords if provided (Pre-filtering)
+  if (keywords && keywords.length > 0) {
+      const initialCount = filteredItems.length;
+      const lowerKeywords = keywords.map(k => k.toLowerCase());
+      const matches = []; // Store sample matches for debugging
+      
+      filteredItems = filteredItems.filter(item => {
+          const title = (item.title || '').toLowerCase();
+          const content = (item.contentSnippet || item.content || '').toLowerCase();
+          
+          // Check if ANY keyword is present
+          const matched = lowerKeywords.some(keyword => title.includes(keyword) || content.includes(keyword));
+          if (matched && matches.length < 5) {
+              matches.push(`"${item.title}"`);
+          }
+          return matched;
+      });
+      aggregatorLogger.info(`Keyword pre-filtering: kept ${filteredItems.length} of ${initialCount} items matching [${keywords.join(', ')}]. Examples: ${matches.join(', ')}`);
+  }
 
   // Sort by date
-  const sortedItems = flattenedItems.sort((a, b) => {
+  const sortedItems = filteredItems.sort((a, b) => {
       try {
         return new Date(b.pubDate) - new Date(a.pubDate);
       } catch(e) {

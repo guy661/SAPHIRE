@@ -169,7 +169,7 @@ const db = require('./database-postgres.js'); // Import database functions
 // ... (other functions remain the same)
 
 const generateSynthesizedSummaryTask = async ({ data }) => {
-    const { articles, user_intent, language = 'de', currentDate, userContext } = data;
+    const { articles, user_intent, language = 'de', currentDate, userContext, previousSummary } = data;
     // taskLogger.info(`Generating a new CONTEXT-AWARE synthesized summary for ${articles.length} articles.`);
 
     // --- 1. Enrich Context ---
@@ -200,10 +200,16 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
     const dislikedTopicsString = dislikedTopicTitles.length > 0 ? dislikedTopicTitles.map(t => `- ${t}`).join('\n') : 'Keine bekannt.';
     const continuingTopicsString = formatTopics(continuingTopics);
     const newTopicsString = formatTopics(newTopics);
+    
+    const previousSummarySection = previousSummary 
+        ? `**VORHERIGES BRIEFING (Kontext):**\n"${previousSummary.substring(0, 3000)}..."\n(Nutze dies, um Wiederholungen zu vermeiden und auf Veränderungen hinzuweisen.)`
+        : `**VORHERIGES BRIEFING:** Keines vorhanden (Dies ist das erste Briefing).`;
 
     const synthesisPrompts = {
         'de': `
-            Du bist ein persönlicher Nachrichten-Chefanalyst. Deine Aufgabe ist es, für einen sehr beschäftigten Kunden ein extrem relevantes, aufbauendes und personalisiertes Briefing zu erstellen. Der Kunde hasst Redundanz und will nur wissen, was wirklich neu und für ihn wichtig ist.
+            Du bist ein persönlicher Nachrichten-Chefanalyst. Deine Aufgabe ist es, für einen sehr beschäftigten Kunden ein extrem relevantes, aufbauendes und personalisiertes Briefing zu erstellen.
+            
+            **WICHTIGSTE REGEL:** Der Kunde hasst Redundanz. Wenn eine Information bereits im "Vorherigen Briefing" stand, darfst du sie NICHT wiederholen, es sei denn, es gibt ein wichtiges Update dazu. Konzentriere dich auf die Veränderungen (Deltas) und neue Nachrichten.
 
             **KUNDEN-PROFIL:**
             - **Allgemeines Interesse:** "${user_intent}"
@@ -212,55 +218,57 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
 
             **HEUTIGES DATUM:** ${currentDate}
 
-            **VERFÜGBARE INFORMATIONEN FÜR HEUTE:**
-            
-            **1. Fortgeführte Themen (Updates zu gestern):**
-            ${continuingTopicsString}
+            ${previousSummarySection}
 
-            **2. Völlig neue Themen für heute:**
+            **VERFÜGBARE NEUE INFORMATIONEN (seit dem letzten Briefing):**
+            ${continuingTopicsString}
             ${newTopicsString}
             
             **DEINE ANWEISUNGEN - Folge diesen Regeln strikt:**
-            1.  **BEGINNE MIT UPDATES:** Starte das Briefing, indem du die fortgeführten Themen behandelst. Sage explizit, dass dies Updates sind. Fasse **nur die neuen Entwicklungen** zusammen. Wiederhole unter keinen Umständen Informationen, die der Kunde wahrscheinlich schon kennt. Beispiel: "Anknüpfend an die gestrige Berichterstattung über [Thema], gibt es heute folgende neue Entwicklung: ..."
-            2.  **PRÄSENTIERE NEUE THEMEN:** Behandle danach die völlig neuen Themen. Leite diesen Abschnitt klar ein. Beispiel: "Zusätzlich gibt es heute einige neue, wichtige Themen:"
+            1.  **INKREMENTELLES UPDATE:** Wenn ein Thema bereits im vorherigen Briefing behandelt wurde, schreibe nur über die **neuen Entwicklungen**. Referenziere das vorherige Wissen des Kunden.
+            2.  **NEUE THEMEN:** Führe Themen, die im vorherigen Briefing gar nicht vorkamen, als neu ein.
             3.  **PERSONALISIEREN & PRIORISIEREN:**
-                - Themen, die den "Likes" des Kunden ähneln, sollten prominenter und ausführlicher behandelt werden. Hebe sie hervor.
-                - Themen, die den "Dislikes" ähneln, sollten nur kurz erwähnt oder ganz weggelassen werden, es sei denn, sie sind von überragender allgemeiner Bedeutung.
-            4.  **SYNTHETISIEREN, NICHT AUFLISTEN:** Webe alle Informationen zu einem einzigen, flüssigen und gut lesbaren Text zusammen. Erstelle keine simple Liste von Zusammenfassungen. Finde Verbindungen, auch zwischen neuen und alten Themen.
-            5.  **FAKTENCHECK & NEUTRALITÄT (WICHTIG):** Wenn du innerhalb eines Themas widersprüchliche Informationen aus verschiedenen Quellen findest, stelle diesen Widerspruch explizit dar. Formuliere neutral. Beispiel: "Während Quelle A berichtet, dass X passiert ist, deutet Quelle B darauf hin, dass Y der Fall sein könnte." Stelle Meinungen nicht als Fakten dar.
-            6.  **STRUKTUR:** Gib dem Briefing eine starke Hauptüberschrift und ein "Kern-Briefing" (2-3 Sätze) am Anfang, das die absolut wichtigsten neuen Erkenntnisse des Tages zusammenfasst. Gliedere den Rest mit klaren Zwischenüberschriften.
+                - Themen, die den "Likes" des Kunden ähneln, sollten prominenter und ausführlicher behandelt werden.
+                - Themen, die den "Dislikes" ähneln, sollten nur kurz erwähnt oder ganz weggelassen werden.
+            4.  **SYNTHETISIEREN & ANALYSIEREN (ALLES IM FLIESSTEXT):**
+                - Webe alle Informationen zu einem einzigen, flüssigen Text zusammen.
+                - **Integriere den Faktencheck und die Medien-Bewertung direkt in den Satzbau.** Wenn Quellen widersprüchlich sind, nenne das konkret ("Während Quelle X behauptet..., weist Quelle Y darauf hin...").
+                - **Bewerte Tonalität und Bias:** Wenn die Berichterstattung auffällig emotional oder einseitig ist, erwähne das subtil im Text (z.B. "Die Berichterstattung hierzu ist auffällig alarmistisch..." oder "Beobachter aus dem konservativen Spektrum werten dies als...").
+                - Erstelle KEINE separaten Listen oder "Analyse"-Boxen. Alles ist ein durchgehender Text.
+            5.  **STRUKTUR:** Gib dem Briefing eine starke Hauptüberschrift und ein "Kern-Briefing" (2-3 Sätze) am Anfang.
 
-            Erstelle nun das persönliche, aufbauende Briefing für den Kunden auf Deutsch.
+            Erstelle nun das inkrementelle, persönliche Briefing auf Deutsch.
         `,
         'en': `
-            You are a personal Chief News Analyst. Your task is to create an extremely relevant, evolving, and personalized briefing for a very busy client. The client hates redundancy and only wants to know what is truly new and important to them.
+            You are a personal Chief News Analyst. Your task is to create an extremely relevant, evolving, and personalized briefing for a busy client.
+
+            **MOST IMPORTANT RULE:** The client hates redundancy. If information was already in the "Previous Briefing", DO NOT repeat it unless there is a significant update. Focus on the changes (deltas) and new news.
 
             **CLIENT PROFILE:**
             - **General Interest:** "${user_intent}"
             - **Preferred Topics (Likes):**\n${likedTopicsString}
-            - **Ignored Topics (Dislikes):**\n${dislikedTopicsString}
+            - **Ignorierte Themen (Dislikes):**\n${dislikedTopicsString}
 
             **TODAY'S DATE:** ${currentDate}
 
-            **AVAILABLE INFORMATION FOR TODAY:**
-            
-            **1. Continuing Topics (Updates from yesterday):**
-            ${continuingTopicsString}
+            ${previousSummarySection}
 
-            **2. Completely New Topics for today:**
+            **AVAILABLE NEW INFORMATION (since last briefing):**
+            ${continuingTopicsString}
             ${newTopicsString}
             
             **YOUR INSTRUCTIONS - Follow these rules strictly:**
-            1.  **START WITH UPDATES:** Begin the briefing by addressing the continuing topics. Explicitly state that these are updates. Summarize **only the new developments**. Do not repeat information the client likely already knows. Example: "Following up on yesterday's reporting on [Topic], today brings a new development: ..."
-            2.  **PRESENT NEW TOPICS:** After that, cover the completely new topics. Clearly introduce this section. Example: "In addition, there are several new, important topics today:"
-            3.  **PERSONALIZE & PRIORITIZE:**
-                - Topics similar to the client's "Likes" should be featured more prominently and in more detail. Highlight them.
-                - Topics similar to the "Dislikes" should be mentioned briefly or omitted entirely, unless they are of overwhelming general importance.
-            4.  **SYNTHESIZE, DON'T LIST:** Weave all information into a single, fluid, and easy-to-read text. Do not create a simple list of summaries. Find connections, even between new and old topics.
-            5.  **FACT-CHECK & NEUTRALITY (IMPORTANT):** If you find conflicting information from different sources within a topic, explicitly state this conflict. Use neutral language. Example: "While source A reports that X happened, source B suggests that Y might be the case." Do not present opinions as facts.
-            6.  **STRUCTURE:** Give the briefing a strong main headline and a "Core Briefing" (2-3 sentences) at the top that summarizes the absolute most important new findings of the day. Structure the rest with clear subheadings.
+            1.  **INCREMENTAL UPDATE:** If a topic was already covered in the previous briefing, write ONLY about the **new developments**. Reference the client's prior knowledge.
+            2.  **NEW TOPICS:** Introduce topics that did not appear in the previous briefing as new.
+            3.  **PERSONALIZE & PRIORITIZE:** Highlight liked topics. Downplay disliked topics.
+            4.  **SYNTHESIZE & ANALYZE (ALL IN RUNNING TEXT):**
+                - Weave everything into a single fluid text.
+                - **Integrate fact-checking and media evaluation directly into the sentences.** If sources conflict, state it ("While Source X claims..., Source Y points out...").
+                - **Assess Tone and Bias:** If reporting is notably emotional or biased, mention it subtly in the text (e.g., "Reporting on this has been notably alarmist..." or "Conservative observers interpret this as...").
+                - DO NOT create separate lists or "analysis" boxes. Everything is one cohesive narrative.
+            5.  **STRUKTUR:** Strong headline and "Core Briefing" summary at the top.
 
-            Now, create the personal, evolving briefing for the client in English.
+            Now, create the incremental, personal briefing in English.
         `
     };
 
@@ -435,32 +443,41 @@ const semanticClusteringTask = async ({ data: { articles, user_intent, language 
     
     // Limit content per article to save tokens, title is most important for clustering often
     const articlesText = articles.map((a, index) => 
-        `[ID: ${index}] TITEL: ${a.fetchedContent.title}\nTEASER: ${a.fetchedContent.content.substring(0, 200)}...`
+        `[ID: ${index}] TITEL: ${a.fetchedContent.title}\nTEASER: ${a.fetchedContent.content.substring(0, 300)}...`
     ).join('\n\n');
 
     const prompt = `
-        Du bist ein intelligenter News-Editor. Deine Aufgabe ist es, eine Liste von Artikeln zu analysieren, irrelevante auszusortieren und die relevanten in logische Themen-Cluster zu gruppieren.
+        Du bist ein **empathischer, hochintelligenter persönlicher News-Kurator**. Deine Aufgabe ist es nicht einfach nur, Nachrichten zu sortieren, sondern den **wahren Willen und die tieferliegende Absicht** des Nutzers zu verstehen und Artikel darauf basierend zu bewerten.
 
-        **User-Interesse:** "${user_intent}"
+        **DIE ABSICHT DES NUTZERS (Dein Kompass):**
+        "${user_intent}"
 
-        **Artikel-Liste:**
+        **Deine Artikel-Liste:**
         ${articlesText}
 
-        **Anweisungen:**
-        1.  **Filterung:** Ignoriere Artikel, die nichts mit dem User-Interesse zu tun haben, Werbung sind oder keinen echten Inhalt haben.
-        2.  **Clustering:** Gruppiere die verbleibenden, relevanten Artikel in thematische Cluster. Artikel, die über dasselbe Ereignis oder Thema berichten, gehören in einen Cluster.
-        3.  Gib jedem Cluster einen prägnanten Titel.
+        **DEINE AUFGABE:**
+        1.  **Tiefes Verständnis:** Versetze dich vollständig in die Lage des Nutzers. Frage dich bei jedem Artikel: *"Würde mein Nutzer, mit genau DIESEM spezifischen Interesse und Mindset, diesen Artikel lesen wollen?"*
+        2.  **Kein bloßes Keyword-Matching:** Sei NICHT starr. Ein Artikel kann hochrelevant sein, auch wenn er keine Keywords aus der User-Absicht enthält, solange er den **Kontext**, die **Folgen** oder **verwandte Aspekte** beleuchtet.
+            *   *Beispiel:* Wenn der Nutzer "Fußball-Bundesliga" mag, ist auch ein Artikel über "TV-Rechte-Vergabe" relevant, auch wenn kein Spielbericht enthalten ist.
+            *   *Beispiel:* Wenn der Nutzer "KI-Entwicklung" verfolgt, ist auch ein Artikel über "Neue Chip-Fabriken" relevant.
+        3.  **Großzügige Relevanz:** Im Zweifel für den Nutzer. Wenn ein Thema auch nur im Entferntesten interessant sein könnte, markiere es als 'is_relevant_to_intent: true'. Nur völlig abwegige Themen (Spam, komplett andere Welt) sind 'false'.
+        4.  **Clustering:** Gruppiere ALLE Artikel. Jeder Artikel muss zwingend einem Cluster zugeordnet werden.
+        5.  **Titel:** Gib jedem Cluster einen prägnanten Titel.
 
         **Antworte AUSSCHLIESSLICH mit diesem JSON-Format:**
         {
             "clusters": [
                 {
-                    "title": "Titel des Themas (z.B. 'Neuer KI-Durchbruch')",
-                    "article_ids": [0, 5, 12] // IDs der Artikel in diesem Cluster
+                    "title": "Titel des Themas",
+                    "article_ids": [0, 5, 12],
+                    "is_relevant_to_intent": true, // Deine empathische Entscheidung
+                    "reason": "Kurze Begründung, warum das Thema für den Nutzer relevant (oder irrelevant) ist."
                 },
                 {
-                    "title": "Weiteres Thema",
-                    "article_ids": [1, 4]
+                    "title": "Thema das der Nutzer sicher NICHT sehen will",
+                    "article_ids": [1],
+                    "is_relevant_to_intent": false,
+                    "reason": "Begründung der Ablehnung."
                 }
             ]
         }
@@ -481,4 +498,75 @@ const semanticClusteringTask = async ({ data: { articles, user_intent, language 
     }
 };
 
-module.exports = { orchestrateChatTask, generateSearchQueriesTask, generateSynthesizedSummaryTask, generateFollowUpAnswerTask, generateClusterAnalysisTask, semanticClusteringTask };
+const selectCategoriesTask = async ({ data: { user_intent, categories, language = 'de' } }) => {
+    // categories is an object where keys are IDs and values have names/descriptions
+    const categoryList = Object.entries(categories).map(([key, cat]) => `- ID: "${key}" -> ${cat.name}`).join('\n');
+
+    const prompt = `
+        Du bist ein News-Kurator. Deine Aufgabe ist es, basierend auf dem Interesse eines Nutzers die passenden Nachrichten-Kategorien aus einer verfügbaren Liste auszuwählen.
+
+        **Nutzer-Interesse:** "${user_intent}"
+
+        **Verfügbare Kategorien:**
+        ${categoryList}
+
+        **Deine Aufgabe:**
+        1. Wähle ALLE Kategorien aus, die für das Nutzer-Interesse relevant sein könnten.
+        2. Sei lieber etwas großzügiger als zu restriktiv, damit dem Nutzer keine wichtigen Nachrichten entgehen.
+        3. Wenn das Interesse sehr breit ist (z.B. "Alles Wichtige"), wähle diverse Hauptkategorien (Politik, Wirtschaft, etc.).
+        4. Gib mindestens 1 Kategorie zurück.
+
+        **Antworte AUSSCHLIESSLICH mit einem JSON-Objekt:**
+        {
+            "selected_category_ids": ["id1", "id3", "id5"]
+        }
+    `;
+
+    try {
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error("No JSON found");
+        
+        const result = JSON.parse(jsonMatch[0]);
+        return result.selected_category_ids || [];
+    } catch (error) {
+        taskLogger.error('Error selecting categories', error);
+        // Fallback: Return all keys if AI fails, to be safe? Or just empty to force retry? 
+        // Better to return empty and handle upstream, or return a default set.
+        return [];
+    }
+};
+
+const generateGeneralKeywordsTask = async ({ data: { user_intent, language = 'de' } }) => {
+    const prompt = `
+        Du bist ein Experte für Such-Algorithmen. Deine Aufgabe ist es, für eine gegebene Nutzer-Intention eine Liste von **allgemeinen Schlüsselwörtern** zu erstellen, die für eine **Vorfilterung von RSS-Feeds** verwendet werden können.
+
+        **Nutzer-Intention:** "${user_intent}"
+
+        **Deine Aufgabe:**
+        1.  Analysiere das Thema.
+        2.  Erstelle eine Liste von 3 bis 6 **Schlüsselwörtern oder kurzen Phrasen**.
+        3.  **WICHTIG:** Jedes Keyword darf **MAXIMAL 2 WÖRTER** lang sein (z.B. "KI", "Künstliche Intelligenz", "Bundestag", "US-Wahl").
+        4.  Die Begriffe müssen **allgemein genug** sein, um in Headlines von relevanten Artikeln vorzukommen (keine zu spezifischen Nische-Begriffe).
+        5.  Antworte auf Deutsch (oder Englisch, wenn der User-Intent englisch ist).
+
+        **Antworte AUSSCHLIESSLICH mit diesem JSON-Format:**
+        {
+            "keywords": ["Begriff 1", "Begriff 2", "Begriff 3"]
+        }
+    `;
+
+    try {
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error("No JSON found");
+        
+        const result = JSON.parse(jsonMatch[0]);
+        return result.keywords || [];
+    } catch (error) {
+        taskLogger.error('Error generating general keywords', error);
+        return [];
+    }
+};
+
+module.exports = { orchestrateChatTask, generateSearchQueriesTask, generateSynthesizedSummaryTask, generateFollowUpAnswerTask, generateClusterAnalysisTask, semanticClusteringTask, selectCategoriesTask, generateGeneralKeywordsTask };

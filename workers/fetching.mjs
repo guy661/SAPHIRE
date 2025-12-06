@@ -20,18 +20,22 @@ const worker = new BullMQWorker('fetch-all', async (job) => {
         const fetchPromises = articles.map(async (article) => {
             let targetUrl = article.link;
             try {
+                logger.debug(`Processing article: "${article.title}" (${article.link})`);
+
                 // FIX: Pre-resolve Google News URLs before extracting content
                 if (article.link.includes('news.google.com')) {
-                    // logger.debug(`Resolving Google URL: ${article.link}`);
+                    logger.debug(`Resolving Google URL for "${article.title}"...`);
                     targetUrl = await getArticleUrl(article.link);
-                    // logger.debug(`Resolved to: ${targetUrl}`);
+                    logger.debug(`Resolved "${article.title}" to: ${targetUrl}`);
                 }
                 
                 const content = await extractArticleText(targetUrl);
+                logger.info(`[SUCCESS] Parsed "${article.title}". Content length: ${content.content.length} chars.`);
+                
                 return { ...article, fetchedContent: content, finalUrl: targetUrl, status: 'fulfilled' };
 
             } catch (error) {
-                logger.error(`Failed to process article ${targetUrl} (Original: ${article.link}). Reason: ${error.message}`);
+                logger.error(`[FAILED] Failed to process article "${article.title}" (${targetUrl}). Reason: ${error.message}`);
                 return { ...article, status: 'rejected', reason: error.message };
             }
         });

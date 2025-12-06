@@ -33,7 +33,7 @@ const worker = new BullMQWorker('semantic-summary', async (job) => {
             data: { articles: candidates, user_intent, language }
         });
 
-        logger.info(`AI identified ${clusters.length} relevant clusters.`);
+        logger.info(`AI processing complete. Analyzed ${candidates.length} articles against intent: "${user_intent.substring(0, 50)}..."`);
 
         if (clusters.length === 0) {
             logger.warn(`No relevant clusters found for job ${jobId}. Marking as failed.`);
@@ -47,20 +47,37 @@ const worker = new BullMQWorker('semantic-summary', async (job) => {
         // For now, we will FLATTEN it back but attach the 'clusterTitle' so Synthesis can use it.
         
         const clusteredArticles = [];
+        let keptClustersCount = 0;
+        let discardedClustersCount = 0;
         
         clusters.forEach(cluster => {
-            cluster.article_ids.forEach(id => {
-                const article = candidates[id];
-                if (article) {
-                    // We attach the AI-generated cluster title to the article object
-                    // The Synthesis worker can use this to skip its own embedding-clustering if present.
+            const clusterArticles = cluster.article_ids.map(id => candidates[id]).filter(Boolean);
+            const articleTitles = clusterArticles.map(a => `"${a.fetchedContent.title}"`).join(', ');
+
+            // Filter based on AI's relevance decision
+            if (cluster.is_relevant_to_intent) {
+                keptClustersCount++;
+                logger.info(`[✅ KEPT] Cluster: "${cluster.title}" (${clusterArticles.length} articles). Reason: ${cluster.reason || 'No reason provided.'} | Articles: ${articleTitles}`);
+                
+                clusterArticles.forEach(article => {
                     clusteredArticles.push({
                         ...article,
                         aiClusterTitle: cluster.title
                     });
-                }
-            });
+                });
+            } else {
+                discardedClustersCount++;
+                logger.info(`[❌ DROPPED] Cluster: "${cluster.title}" (${clusterArticles.length} articles). Reason: ${cluster.reason || 'No reason provided.'} | Articles: ${articleTitles}`);
+            }
         });
+        
+        logger.info(`Filtering summary: Kept ${keptClustersCount} clusters (${clusteredArticles.length} articles), Discarded ${discardedClustersCount} clusters.`);
+
+        if (clusteredArticles.length === 0) {
+             logger.warn(`No relevant articles remained after AI filtering for job ${jobId}. Marking as failed.`);
+             await db.updateJobStatus(jobId, 'failed', 'No relevant content found after AI filter.');
+             return;
+        }
 
         await synthesisQueue.add('synthesize', {
             jobId,
