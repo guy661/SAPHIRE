@@ -46,7 +46,14 @@ class Logger {
     }
 
     error(message, errorObj = null) {
-        const errorMessage = errorObj ? `${message} | Stack: ${errorObj.stack}` : message;
+        let errorMessage = message;
+        if (errorObj) {
+            if (process.env.NODE_ENV === 'development') {
+                errorMessage += ` | Stack: ${errorObj.stack}`;
+            } else {
+                errorMessage += ` | Error: ${errorObj.message}`;
+            }
+        }
         console.error(`[${this.prefix}] ${this.emoji} [${new Date().toLocaleTimeString()}] [ERROR] ${errorMessage}`);
     }
 
@@ -99,10 +106,11 @@ async function getNextAvailableApiClient() {
             }
         }
 
-        // If all keys are busy, wait until the earliest one becomes available
-        const waitTime = earliestNextAvailableTime - Date.now() + 50; // +50ms buffer
+        // If all keys are busy, wait 61 seconds to fully reset the window
+        // const waitTime = earliestNextAvailableTime - Date.now() + 50; // +50ms buffer
+        const waitTime = 61000;
         if (waitTime > 0) {
-            rateLimitLogger.warn(`All API keys are busy. Waiting for ${Math.ceil(waitTime / 1000)}s...`);
+            rateLimitLogger.warn(`All API keys are busy. Waiting for 61s...`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
         }
     }
@@ -114,11 +122,13 @@ function getApiKeyCount() {
 }
 
 async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, maxOutputTokens = 2048) {
-    const genAI = await getNextAvailableApiClient();
-    const generativeModel = genAI.getGenerativeModel({ model });
-    const result = await generativeModel.generateContent(prompt);
-    const response = await result.response;
-    return response.text();
+    return retry(async () => {
+        const genAI = await getNextAvailableApiClient();
+        const generativeModel = genAI.getGenerativeModel({ model });
+        const result = await generativeModel.generateContent(prompt);
+        const response = await result.response;
+        return response.text();
+    }, 3, 2000, 'Gemini call failed');
 }
 
 async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', temperature = 0.5) {

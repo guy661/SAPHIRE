@@ -3,7 +3,7 @@ const { retry, callGemini, callGeminiChat, Logger, EMOJIS } = require('./utils.j
 const taskLogger = new Logger('Task', 'yellow', EMOJIS.task);
 
 const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) => {
-    taskLogger.info(`Orchestrating chat with history length: ${chatHistory.length}`);
+    // taskLogger.info(`Orchestrating chat with history length: ${chatHistory.length}`);
 
     const tools = [
         {
@@ -81,7 +81,7 @@ const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) =
             return { action: 'reply', message: "Ein interner Fehler ist aufgetreten. Die KI hat eine unbekannte Aktion versucht." };
 
         } else { // It's a text response
-            taskLogger.info(`AI responded with text: "${result}"`);
+            // taskLogger.info(`AI responded with text: "${result}"`);
             return {
                 action: 'reply',
                 message: result
@@ -97,7 +97,7 @@ const orchestrateChatTask = async ({ data: { chatHistory, language = 'de' } }) =
 };
 
 const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' } }) => {
-    taskLogger.info(`Generating search queries for intent: "${user_intent.substring(0, 50)}"...`);
+    // taskLogger.info(`Generating search queries for intent: "${user_intent.substring(0, 50)}"...`);
 
     const genQueryPrompts = {
         'de': (intent) => `
@@ -147,7 +147,7 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
     
     try {
         const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
-        taskLogger.debug(`Raw AI query generation response: ${responseString}`);
+        // taskLogger.debug(`Raw AI query generation response: ${responseString}`);
         
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error('No JSON object found in AI response for query generation.');
@@ -155,7 +155,7 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
         const result = JSON.parse(jsonMatch[0]);
         if (!result.queries || !Array.isArray(result.queries)) throw new Error('Invalid JSON structure in AI response.');
 
-        taskLogger.info(`Generated ${result.queries.length} search queries.`);
+        // taskLogger.info(`Generated ${result.queries.length} search queries.`);
         return result.queries;
 
     } catch (error) {
@@ -164,71 +164,124 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
     }
 };
 
-const generateSynthesizedSummaryTask = async ({ data: { articles, user_intent, language = 'de', currentDate } }) => {
-    taskLogger.info(`Generating a single synthesized summary for ${articles.length} articles.`);
+const db = require('./database-postgres.js'); // Import database functions
 
-    const articleTexts = articles.map((a, i) => 
-        `ARTIKEL ${i + 1} (Quelle: ${new URL(a.link).hostname}, Titel: ${a.fetchedContent.title}):\n${a.fetchedContent.content}\n\n------------------\n\n`
-    ).join('');
+// ... (other functions remain the same)
+
+const generateSynthesizedSummaryTask = async ({ data }) => {
+    const { articles, user_intent, language = 'de', currentDate, userContext } = data;
+    // taskLogger.info(`Generating a new CONTEXT-AWARE synthesized summary for ${articles.length} articles.`);
+
+    // --- 1. Enrich Context ---
+    const [likedTopics, dislikedTopics, previousTopics] = await Promise.all([
+        db.getClusterTitlesByIds(userContext.likedClusterIds || []),
+        db.getClusterTitlesByIds(userContext.dislikedClusterIds || []),
+        db.getClusterTitlesByIds(userContext.previousClusterIds || [])
+    ]);
+    
+    const likedTopicTitles = likedTopics.map(t => t.representative_title);
+    const dislikedTopicTitles = dislikedTopics.map(t => t.representative_title);
+    const previousTopicIds = userContext.previousClusterIds || [];
+
+    // --- 2. Prepare Today's Topics ---
+    const todayTopics = articles.map(a => ({
+        id: a.clusterId,
+        title: a.fetchedContent.title,
+        summary: a.fetchedContent.content
+    }));
+
+    const continuingTopics = todayTopics.filter(t => previousTopicIds.includes(t.id));
+    const newTopics = todayTopics.filter(t => !previousTopicIds.includes(t.id));
+
+    // --- 3. Build Prompt Components ---
+    const formatTopics = (topicArray) => topicArray.length > 0 ? topicArray.map(t => `- "${t.title}": ${t.summary}`).join('\n') : 'Keine.';
+    
+    const likedTopicsString = likedTopicTitles.length > 0 ? likedTopicTitles.map(t => `- ${t}`).join('\n') : 'Keine bekannt.';
+    const dislikedTopicsString = dislikedTopicTitles.length > 0 ? dislikedTopicTitles.map(t => `- ${t}`).join('\n') : 'Keine bekannt.';
+    const continuingTopicsString = formatTopics(continuingTopics);
+    const newTopicsString = formatTopics(newTopics);
 
     const synthesisPrompts = {
-        'de': (intent, content, date) => `
-            Du bist ein brillanter Chefredakteur. Deine Aufgabe ist es, aus einem Stapel ungefilterter Artikel ein einziges, schlüssiges und prägnantes Briefing für einen sehr beschäftigten Kunden zu erstellen.
+        'de': `
+            Du bist ein persönlicher Nachrichten-Chefanalyst. Deine Aufgabe ist es, für einen sehr beschäftigten Kunden ein extrem relevantes, aufbauendes und personalisiertes Briefing zu erstellen. Der Kunde hasst Redundanz und will nur wissen, was wirklich neu und für ihn wichtig ist.
 
-            **Kundeninteresse:** "${intent}"
-            **Heutiges Datum:** ${date}
+            **KUNDEN-PROFIL:**
+            - **Allgemeines Interesse:** "${user_intent}"
+            - **Bevorzugte Themen (Likes):**\n${likedTopicsString}
+            - **Ignorierte Themen (Dislikes):**\n${dislikedTopicsString}
 
-            **DEINE ANWEISUNGEN:**
-            1.  **SYNTHETISIEREN, NICHT AUFLISTEN:** Deine wichtigste Aufgabe ist es, Verbindungen, Überschneidungen und Widersprüche zwischen den Artikeln zu finden. Fasse nicht jeden Artikel einzeln zusammen. Deine Aufgabe ist es, die Kernaussagen aus allen Artikeln zu einem einzigen, flüssigen Text zu verweben.
-            2.  **REDUNDANZ ELIMINIEREN:** Viele Artikel werden dieselben Grundfakten wiederholen. Erwähne eine Information nur einmal. Konzentriere dich auf die Nuancen, die unterschiedlichen Perspektiven oder die einzigartigen Details, die jeder Artikel hinzufügt.
-            3.  **STRUKTUR & KLARHEIT:** Gib deinem Briefing eine klare Struktur. 
-                - Beginne mit einer aussagekräftigen **Hauptüberschrift**.
-                - Fasse die absolut wichtigsten Erkenntnisse in einem **"Kern-Briefing"** von 2-3 Sätzen zusammen.
-                - Gliedere den Rest des Textes mit **klaren Zwischenüberschriften**, die die wichtigsten Unterthemen zusammenfassen, die sich aus den Artikeln ergeben.
-            4.  **FOKUS AUF RELEVANZ:** Behalte immer das Kundeninteresse im Auge. Nur Informationen, die direkt für dieses Interesse relevant sind, gehören in die Zusammenfassung.
+            **HEUTIGES DATUM:** ${currentDate}
 
-            **VERFÜGBARE ARTIKEL:**
-            ${content}
+            **VERFÜGBARE INFORMATIONEN FÜR HEUTE:**
+            
+            **1. Fortgeführte Themen (Updates zu gestern):**
+            ${continuingTopicsString}
 
-            Erstelle nun das synthetisierte Briefing.
+            **2. Völlig neue Themen für heute:**
+            ${newTopicsString}
+            
+            **DEINE ANWEISUNGEN - Folge diesen Regeln strikt:**
+            1.  **BEGINNE MIT UPDATES:** Starte das Briefing, indem du die fortgeführten Themen behandelst. Sage explizit, dass dies Updates sind. Fasse **nur die neuen Entwicklungen** zusammen. Wiederhole unter keinen Umständen Informationen, die der Kunde wahrscheinlich schon kennt. Beispiel: "Anknüpfend an die gestrige Berichterstattung über [Thema], gibt es heute folgende neue Entwicklung: ..."
+            2.  **PRÄSENTIERE NEUE THEMEN:** Behandle danach die völlig neuen Themen. Leite diesen Abschnitt klar ein. Beispiel: "Zusätzlich gibt es heute einige neue, wichtige Themen:"
+            3.  **PERSONALISIEREN & PRIORISIEREN:**
+                - Themen, die den "Likes" des Kunden ähneln, sollten prominenter und ausführlicher behandelt werden. Hebe sie hervor.
+                - Themen, die den "Dislikes" ähneln, sollten nur kurz erwähnt oder ganz weggelassen werden, es sei denn, sie sind von überragender allgemeiner Bedeutung.
+            4.  **SYNTHETISIEREN, NICHT AUFLISTEN:** Webe alle Informationen zu einem einzigen, flüssigen und gut lesbaren Text zusammen. Erstelle keine simple Liste von Zusammenfassungen. Finde Verbindungen, auch zwischen neuen und alten Themen.
+            5.  **FAKTENCHECK & NEUTRALITÄT (WICHTIG):** Wenn du innerhalb eines Themas widersprüchliche Informationen aus verschiedenen Quellen findest, stelle diesen Widerspruch explizit dar. Formuliere neutral. Beispiel: "Während Quelle A berichtet, dass X passiert ist, deutet Quelle B darauf hin, dass Y der Fall sein könnte." Stelle Meinungen nicht als Fakten dar.
+            6.  **STRUKTUR:** Gib dem Briefing eine starke Hauptüberschrift und ein "Kern-Briefing" (2-3 Sätze) am Anfang, das die absolut wichtigsten neuen Erkenntnisse des Tages zusammenfasst. Gliedere den Rest mit klaren Zwischenüberschriften.
+
+            Erstelle nun das persönliche, aufbauende Briefing für den Kunden auf Deutsch.
         `,
-        'en': (intent, content, date) => `
-            You are a brilliant Editor-in-Chief. Your task is to create a single, cohesive, and concise briefing for a very busy client from a pile of unfiltered articles.
+        'en': `
+            You are a personal Chief News Analyst. Your task is to create an extremely relevant, evolving, and personalized briefing for a very busy client. The client hates redundancy and only wants to know what is truly new and important to them.
 
-            **Client's Interest:** "${intent}"
-            **Today's Date:** ${date}
+            **CLIENT PROFILE:**
+            - **General Interest:** "${user_intent}"
+            - **Preferred Topics (Likes):**\n${likedTopicsString}
+            - **Ignored Topics (Dislikes):**\n${dislikedTopicsString}
 
-            **YOUR INSTRUCTIONS:**
-            1.  **SYNTHESIZE, DON'T LIST:** Your most important job is to find the connections, overlaps, and contradictions between the articles. Do not summarize each article individually. Your job is to weave the key takeaways from all articles into a single, fluid text.
-            2.  **ELIMINATE REDUNDANCY:** Many articles will repeat the same basic facts. Mention a piece of information only once. Focus on the nuances, the different perspectives, or the unique details each article adds.
-            3.  **STRUCTURE & CLARITY:** Give your briefing a clear structure. 
-                - Start with a powerful **Main Headline**.
-                - Summarize the absolute most critical findings in a **"Core Briefing"** of 2-3 sentences.
-                - Structure the rest of the text with **clear subheadings** that group the main sub-topics emerging from the articles.
-            4.  **FOCUS ON RELEVANCE:** Always keep the client's interest in mind. Only information directly relevant to this interest belongs in the summary.
+            **TODAY'S DATE:** ${currentDate}
 
-            **AVAILABLE ARTICLES:**
-            ${content}
+            **AVAILABLE INFORMATION FOR TODAY:**
+            
+            **1. Continuing Topics (Updates from yesterday):**
+            ${continuingTopicsString}
 
-            Now, create the synthesized briefing.
+            **2. Completely New Topics for today:**
+            ${newTopicsString}
+            
+            **YOUR INSTRUCTIONS - Follow these rules strictly:**
+            1.  **START WITH UPDATES:** Begin the briefing by addressing the continuing topics. Explicitly state that these are updates. Summarize **only the new developments**. Do not repeat information the client likely already knows. Example: "Following up on yesterday's reporting on [Topic], today brings a new development: ..."
+            2.  **PRESENT NEW TOPICS:** After that, cover the completely new topics. Clearly introduce this section. Example: "In addition, there are several new, important topics today:"
+            3.  **PERSONALIZE & PRIORITIZE:**
+                - Topics similar to the client's "Likes" should be featured more prominently and in more detail. Highlight them.
+                - Topics similar to the "Dislikes" should be mentioned briefly or omitted entirely, unless they are of overwhelming general importance.
+            4.  **SYNTHESIZE, DON'T LIST:** Weave all information into a single, fluid, and easy-to-read text. Do not create a simple list of summaries. Find connections, even between new and old topics.
+            5.  **FACT-CHECK & NEUTRALITY (IMPORTANT):** If you find conflicting information from different sources within a topic, explicitly state this conflict. Use neutral language. Example: "While source A reports that X happened, source B suggests that Y might be the case." Do not present opinions as facts.
+            6.  **STRUCTURE:** Give the briefing a strong main headline and a "Core Briefing" (2-3 sentences) at the top that summarizes the absolute most important new findings of the day. Structure the rest with clear subheadings.
+
+            Now, create the personal, evolving briefing for the client in English.
         `
     };
 
-    const prompt = (synthesisPrompts[language] || synthesisPrompts['de'])(user_intent, articleTexts, currentDate);
+    const prompt = (synthesisPrompts[language] || synthesisPrompts['de']);
 
     try {
-        // Using a more capable model for this complex task might be better.
+        // Using a more capable model for this complex task is recommended. E.g. gemini-1.5-pro
         const summary = await callGemini(prompt, 'gemini-2.5-flash', 0.4);
-        taskLogger.info(`Successfully generated synthesized summary.`);
+        taskLogger.info(`Successfully generated CONTEXT-AWARE synthesized summary.`);
         return summary;
     } catch (error) {
-        taskLogger.error('Error generating synthesized summary', error);
-        throw new Error(`Failed to generate synthesized summary: ${error.message}`);
+        taskLogger.error('Error generating context-aware synthesized summary', error);
+        throw new Error(`Failed to generate context-aware synthesized summary: ${error.message}`);
     }
 };
 
+// ... (the rest of the file, generateFollowUpAnswerTask etc., remains the same)
+
+
 const generateFollowUpAnswerTask = async ({ data: { question, chatHistory, summary, language = 'de' } }) => {
-    taskLogger.info(`Generating follow-up answer for question: "${question.substring(0, 50)}"...`);
+    // taskLogger.info(`Generating follow-up answer for question: "${question.substring(0, 50)}"...`);
 
     // Clean the history to be safe.
     const cleanedHistory = (chatHistory || []).filter(entry =>
@@ -295,7 +348,7 @@ const generateFollowUpAnswerTask = async ({ data: { question, chatHistory, summa
     try {
         // Use the simple, robust callGemini function, following the pattern of working tasks.
         const answer = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
-        taskLogger.info(`Successfully generated follow-up answer.`);
+        // taskLogger.info(`Successfully generated follow-up answer.`);
         return answer;
     } catch (error) {
         taskLogger.error('Error generating follow-up answer', error);
@@ -303,4 +356,129 @@ const generateFollowUpAnswerTask = async ({ data: { question, chatHistory, summa
     }
 };
 
-module.exports = { orchestrateChatTask, generateSearchQueriesTask, generateSynthesizedSummaryTask, generateFollowUpAnswerTask };
+const generateClusterAnalysisTask = async ({ data: { articles, user_intent, language = 'de' } }) => {
+    // taskLogger.info(`Generating analysis for a cluster of ${articles.length} articles.`);
+
+    const articleTexts = articles.map((a, i) => 
+        `ARTIKEL ${i + 1} (Quelle: ${a.sourceName || 'Unbekannt'}, Titel: ${a.fetchedContent.title}):\n${a.fetchedContent.content}\n\n---\n\n`
+    ).join('');
+
+    const analysisPrompts = {
+        'de': (intent, content) => `
+            Sie sind ein präziser und unparteiischer Nachrichtenanalyst. Ihre Aufgabe ist es, eine Gruppe von Artikeln zu einem einzigen Thema zu analysieren und eine strukturierte Zusammenfassung zu erstellen.
+
+            **Kundeninteresse:** "${intent}"
+
+            **ARTIKEL ZUM THEMA:**
+            ${content}
+
+            **IHRE AUFGABE:**
+            Analysieren Sie die bereitgestellten Artikel und geben Sie **AUSSCHLIESSLICH ein einziges, gültiges JSON-Objekt** zurück, ohne einleitenden Text. Das JSON-Objekt muss die folgende Struktur haben:
+            {
+              "summary": "Eine kurze, prägnante Zusammenfassung der wichtigsten Informationen aus den Artikeln in 2-4 Sätzen. Synthetisieren Sie die Kernaussagen, listen Sie nicht nur Fakten auf.",
+              "sentiment": "Beschreiben Sie die allgemeine Stimmung oder den Ton der Berichterstattung. Wählen Sie EINEN der folgenden Werte: 'Positiv', 'Negativ', 'Neutral'.",
+              "focus": "Identifizieren Sie den primären Fokus der Artikel. Wählen Sie EINEN der folgenden Werte: 'Politik', 'Wirtschaft', 'Technologie', 'Gesellschaft', 'Wissenschaft', 'Gesundheit', 'Sport', 'Kultur', 'Sonstiges'.",
+              "bias": "Bewerten Sie die wahrgenommene politische Tendenz der Berichterstattung. Seien Sie konservativ in Ihrer Einschätzung. Wählen Sie EINEN der folgenden Werte: 'Links-orientiert', 'Rechts-orientiert', 'Mitte/Neutral'."
+            }
+        `,
+        'en': (intent, content) => `
+            You are a precise and impartial news analyst. Your task is to analyze a group of articles on a single topic and provide a structured summary.
+
+            **Client's Interest:** "${intent}"
+
+            **ARTICLES ON THE TOPIC:**
+            ${content}
+
+            **YOUR TASK:**
+            Analyze the provided articles and return **ONLY a single, valid JSON object** with no introductory text. The JSON object must have the following structure:
+            {
+              "summary": "A short, concise summary of the key information from the articles in 2-4 sentences. Synthesize the core findings, don't just list facts.",
+              "sentiment": "Describe the overall sentiment or tone of the reporting. Choose ONE of the following: 'Positive', 'Negative', 'Neutral'.",
+              "focus": "Identify the primary focus of the articles. Choose ONE of the following: 'Politics', 'Business', 'Technology', 'Society', 'Science', 'Health', 'Sports', 'Culture', 'Other'.",
+              "bias": "Assess the perceived political bias of the reporting. Be conservative in your assessment. Choose ONE of the following: 'Left-leaning', 'Right-leaning', 'Center/Neutral'."
+            }
+        `
+    };
+
+    const prompt = (analysisPrompts[language] || analysisPrompts['de'])(user_intent, articleTexts);
+
+    try {
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.2);
+        // taskLogger.debug(`Raw AI cluster analysis response: ${responseString}`);
+        
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error('No JSON object found in AI response for cluster analysis.');
+        
+        const result = JSON.parse(jsonMatch[0]);
+        // Basic validation
+        if (!result.summary || !result.sentiment || !result.focus || !result.bias) {
+            throw new Error('Invalid JSON structure in AI response for cluster analysis.');
+        }
+
+        // taskLogger.info(`Successfully generated analysis for cluster.`);
+        return result;
+
+    } catch (error) {
+        taskLogger.error('Error generating cluster analysis', error);
+        // Return a default error structure
+        return {
+            summary: "Die Analyse für diese Artikelgruppe ist fehlgeschlagen.",
+            sentiment: "Unbekannt",
+            focus: "Unbekannt",
+            bias: "Unbekannt"
+        };
+    }
+};
+
+const semanticClusteringTask = async ({ data: { articles, user_intent, language = 'de' } }) => {
+    // articles expects array of { id, title, content }
+    
+    // Limit content per article to save tokens, title is most important for clustering often
+    const articlesText = articles.map((a, index) => 
+        `[ID: ${index}] TITEL: ${a.fetchedContent.title}\nTEASER: ${a.fetchedContent.content.substring(0, 200)}...`
+    ).join('\n\n');
+
+    const prompt = `
+        Du bist ein intelligenter News-Editor. Deine Aufgabe ist es, eine Liste von Artikeln zu analysieren, irrelevante auszusortieren und die relevanten in logische Themen-Cluster zu gruppieren.
+
+        **User-Interesse:** "${user_intent}"
+
+        **Artikel-Liste:**
+        ${articlesText}
+
+        **Anweisungen:**
+        1.  **Filterung:** Ignoriere Artikel, die nichts mit dem User-Interesse zu tun haben, Werbung sind oder keinen echten Inhalt haben.
+        2.  **Clustering:** Gruppiere die verbleibenden, relevanten Artikel in thematische Cluster. Artikel, die über dasselbe Ereignis oder Thema berichten, gehören in einen Cluster.
+        3.  Gib jedem Cluster einen prägnanten Titel.
+
+        **Antworte AUSSCHLIESSLICH mit diesem JSON-Format:**
+        {
+            "clusters": [
+                {
+                    "title": "Titel des Themas (z.B. 'Neuer KI-Durchbruch')",
+                    "article_ids": [0, 5, 12] // IDs der Artikel in diesem Cluster
+                },
+                {
+                    "title": "Weiteres Thema",
+                    "article_ids": [1, 4]
+                }
+            ]
+        }
+    `;
+
+    try {
+        // Use a slightly higher temperature for creative grouping
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error("No JSON found");
+        
+        const result = JSON.parse(jsonMatch[0]);
+        return result.clusters || [];
+
+    } catch (error) {
+        taskLogger.error('Error in semantic clustering', error);
+        return [];
+    }
+};
+
+module.exports = { orchestrateChatTask, generateSearchQueriesTask, generateSynthesizedSummaryTask, generateFollowUpAnswerTask, generateClusterAnalysisTask, semanticClusteringTask };

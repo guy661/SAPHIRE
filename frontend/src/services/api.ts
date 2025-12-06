@@ -55,15 +55,22 @@ export async function getDashboardJobs(id: string) {
     return handleResponse(response);
 }
 
-export async function runDashboardSearch(id: string) {
+export async function runDashboardSearch(id: string, rssCategories: string[]) {
     const response = await fetch(`${API_BASE_URL}/dashboards/${id}/run-search`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rss_categories: rssCategories }),
     });
     return handleResponse(response);
 }
 
 export async function getJobStatus(jobId: string) {
     const response = await fetch(`${API_BASE_URL}/job/${jobId}`);
+    return handleResponse(response);
+}
+
+export async function getJobClusters(jobId: string) {
+    const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/clusters`);
     return handleResponse(response);
 }
 
@@ -81,6 +88,20 @@ export async function runPersonalizationChat(dashboardId: string, message: strin
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message }),
+    });
+    return handleResponse(response);
+}
+
+export async function getAvailableRssCategories() {
+    const response = await fetch(`${API_BASE_URL}/rss/categories`);
+    return handleResponse(response);
+}
+
+export async function submitFeedback(clusterId: number, feedbackType: 'like' | 'dislike' | null) {
+    const response = await fetch(`${API_BASE_URL}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clusterId, feedbackType }),
     });
     return handleResponse(response);
 }

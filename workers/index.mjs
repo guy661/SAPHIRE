@@ -1,7 +1,9 @@
 import 'dotenv/config';
 
-// The new synthesis worker replaces the old fetch and semanticSummary workers.
+// Import and start all workers
+import './fetching.mjs';
+import './semantic.mjs';
 import './synthesis.mjs';
 
-console.log('Synthesis worker is running...');
+console.log('Fetching, Semantic, and Synthesis workers are running...');
 

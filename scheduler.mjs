@@ -8,24 +8,24 @@ const schedulerLogger = new Logger('Scheduler', 'yellow', EMOJIS.scheduler);
 const CHECK_INTERVAL_MS = 60 * 1000; // Check every 60 seconds
 
 async function checkAndRunScheduledJobs() {
-    schedulerLogger.info('Checking for scheduled jobs to run...');
+    // schedulerLogger.info('Checking for scheduled jobs to run...');
     const dashboards = await db.getAllDashboardsWithInterval();
     
     if (dashboards.length === 0) {
-        schedulerLogger.info('No dashboards with active intervals. Standing by.');
+        // schedulerLogger.info('No dashboards with active intervals. Standing by.');
         return;
     }
 
-    schedulerLogger.info(`Found ${dashboards.length} dashboards with intervals.`);
+    // schedulerLogger.info(`Found ${dashboards.length} dashboards with intervals.`);
 
     for (const dashboard of dashboards) {
         const dashboardId = dashboard.id;
-        schedulerLogger.info(`Checking dashboard #${dashboardId} ("${dashboard.name}")...`);
+        // schedulerLogger.info(`Checking dashboard #${dashboardId} ("${dashboard.name}")...`);
 
         // 1. Check if a job is already running for this dashboard
         const activeJob = await db.getActiveJobForDashboard(dashboardId);
         if (activeJob) {
-            schedulerLogger.info(`Dashboard #${dashboardId} has an active job (${activeJob.id}). Skipping.`);
+            // schedulerLogger.info(`Dashboard #${dashboardId} has an active job (${activeJob.id}). Skipping.`);
             continue;
         }
 
@@ -36,7 +36,7 @@ async function checkAndRunScheduledJobs() {
         const intervalMillis = dashboard.interval_minutes * 60 * 1000;
         const timeSinceLastEvent = Date.now() - lastEventTime.getTime();
 
-        schedulerLogger.info(`Dashboard #${dashboardId}: ${Math.round(timeSinceLastEvent / 60000)} min passed since last event. Interval is ${dashboard.interval_minutes} min.`);
+        // schedulerLogger.info(`Dashboard #${dashboardId}: ${Math.round(timeSinceLastEvent / 60000)} min passed since last event. Interval is ${dashboard.interval_minutes} min.`);
 
         // 3. If the interval has passed, start a new job
         if (timeSinceLastEvent >= intervalMillis) {
@@ -51,7 +51,7 @@ async function checkAndRunScheduledJobs() {
                 schedulerLogger.error(`Failed to start a scheduled job for dashboard #${dashboardId}:`, error);
             }
         } else {
-            schedulerLogger.info(`Dashboard #${dashboardId} is not due yet. Skipping.`);
+            // schedulerLogger.info(`Dashboard #${dashboardId} is not due yet. Skipping.`);
         }
     }
 }

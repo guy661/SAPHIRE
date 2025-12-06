@@ -20,9 +20,9 @@ const IN_PROD = process.env.NODE_ENV === 'production';
 
 async function main() {
     const queuesModule = await import('./queues.mjs');
-    const fetchQueue = queuesModule.default.fetchQueue;
+    const { fetchAllQueue } = queuesModule.default;
 
-    if (!fetchQueue) throw new Error('fetchQueue is undefined!');
+    if (!fetchAllQueue) throw new Error('fetchAllQueue is undefined!');
     serverLogger.info('Queues initialized.');
 
     const { getApiKeyCount } = require('./utils.js');
@@ -62,6 +62,8 @@ async function main() {
     
     const { startSearchJob } = require('./job-starter.js');
     const { getFeedCategories } = require('./rss-aggregator.js');
+    const { tts } = require('node-edge-tts');
+    const { Readable } = require('stream');
 
     // AUTHENTICATION ROUTES
     app.post('/api/login', async (req, res) => {
@@ -120,6 +122,44 @@ async function main() {
             res.status(401).json({ error: 'Not authenticated' });
         }
     });
+    
+    // --- AUDIO API ---
+    app.get('/api/audio-summary', isAuthenticated, async (req, res) => {
+        serverLogger.info(`Audio summary requested for user ${req.session.userId}`);
+        
+        let textToSpeak = "Es konnten keine Nachrichten zum Vorlesen gefunden werden. Bitte führen Sie zuerst eine Suche in einem Ihrer Dashboards durch.";
+
+        try {
+            // 1. Find the most recent dashboard for the user
+            const dashboards = await db.getDashboardsByUserId(req.session.userId);
+            if (dashboards.length > 0) {
+                // For simplicity, we'll use the most recently created dashboard.
+                const latestDashboard = dashboards[0];
+                
+                // 2. Find the last completed job for that dashboard
+                const lastJob = await db.getLatestCompletedJobForDashboard(latestDashboard.id);
+
+                if (lastJob && lastJob.meta_summary) {
+                    // 3. Use its meta summary as the text
+                    textToSpeak = `Ihr persönliches Briefing für das Dashboard ${latestDashboard.name}: \n\n ${lastJob.meta_summary}`;
+                } else {
+                    textToSpeak = `Für Ihr Dashboard "${latestDashboard.name}" wurde noch kein Nachrichten-Briefing erstellt.`;
+                }
+            }
+
+            const audioStream = await tts(textToSpeak, { voice: 'de-DE-KatjaNeural' });
+            
+            res.setHeader('Content-Type', 'audio/mpeg');
+
+            const readable = Readable.from(audioStream);
+            readable.pipe(res);
+
+        } catch (error) {
+            serverLogger.error('TTS Generation Error:', error);
+            res.status(500).json({ error: 'Failed to generate audio summary.' });
+        }
+    });
+
 
     // --- DASHBOARD CRUD API ---
     app.get('/api/dashboards', isAuthenticated, async (req, res) => {
@@ -212,7 +252,7 @@ async function main() {
         const { id } = req.params;
         const { rss_categories = [] } = req.body; // Expects an array of category keys
 
-        serverLogger.info(`/api/dashboards/${id}/run-search POST route started for user ${req.session.userId}`);
+        // serverLogger.info(`/api/dashboards/${id}/run-search POST route started for user ${req.session.userId}`);
         
         try {
             const jobId = await startSearchJob(parseInt(id, 10), req.session.userId, rss_categories);
@@ -295,6 +335,29 @@ async function main() {
         }
     });
 
+    app.get("/api/jobs/:jobId/clusters", isAuthenticated, async (req, res) => {
+        const { jobId } = req.params;
+        const { userId } = req.session; // Get userId from session
+        try {
+            // Authorization Check: Ensure the job belongs to the logged-in user.
+            const job = await db.getJob(jobId);
+            if (!job) return res.status(404).json({ error: "Job not found" });
+
+            const dashboard = await db.getDashboardById(job.dashboard_id);
+            if (!dashboard || dashboard.user_id !== userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+
+            // Fetch the clustered articles for the job, now with user feedback
+            const clusters = await db.getClustersByJobId(jobId, userId);
+            res.json(clusters);
+
+        } catch (err) {
+            serverLogger.error(`Error fetching clusters for job ${jobId}:`, err);
+            res.status(500).json({ error: "Error fetching cluster results" });
+        }
+    });
+
     app.post("/api/jobs/:jobId/chat", isAuthenticated, async (req, res) => {
         const { jobId } = req.params;
         const { message, chatHistory, summary } = req.body;
@@ -338,6 +401,30 @@ async function main() {
         } catch (error) {
             serverLogger.error('Error fetching RSS categories:', error);
             res.status(500).json({ error: 'Failed to fetch RSS categories' });
+        }
+    });
+
+    app.post('/api/feedback', isAuthenticated, async (req, res) => {
+        const { clusterId, feedbackType } = req.body;
+        const userId = req.session.userId;
+
+        if (!clusterId) {
+            return res.status(400).json({ error: 'clusterId is required.' });
+        }
+
+        try {
+            if (feedbackType === 'like' || feedbackType === 'dislike') {
+                // Upsert logic
+                const feedback = await db.addUserFeedback(userId, clusterId, feedbackType);
+                res.status(201).json(feedback);
+            } else {
+                // Deletion logic for null or other values
+                await db.deleteUserFeedback(userId, clusterId);
+                res.status(204).send(); // 204 No Content is appropriate for successful deletion
+            }
+        } catch (error) {
+            serverLogger.error(`Error processing feedback for user ${userId} on cluster ${clusterId}:`, error);
+            res.status(500).json({ error: 'Failed to process feedback.' });
         }
     });
 

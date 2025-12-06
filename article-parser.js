@@ -39,23 +39,25 @@ function _parseHtmlWithCheerio(html, realUrl) {
     const cleanedContent = articleContent.replace(/\s{3,}/g, '\n\n').trim();
 
     // --- NEW "INTELLIGENT" PAYWALL DETECTION ---
-    if (cleanedContent.length < 400) {
-        parserLogger.warn(`Content is short (${cleanedContent.length} chars). Scanning for high-confidence paywall indicators.`);
+    if (cleanedContent.length < 250) {
+        // parserLogger.warn(`Content is short (${cleanedContent.length} chars). Scanning for high-confidence paywall indicators.`);
         const pageText = $.text().toLowerCase();
         for (const keyword of PAYWALL_INDICATORS.keywords) {
             if (pageText.includes(keyword)) {
-                throw new PaywallError(`Paywall suspected: Content is short AND keyword "${keyword}" was found.`);
+                // throw new PaywallError(`Paywall suspected: Content is short AND keyword "${keyword}" was found.`);
+                 parserLogger.warn(`Potential Paywall detected but keeping content: ${keyword}`);
             }
         }
         for (const selector of PAYWALL_INDICATORS.selectors) {
             if ($(selector).length > 0) {
-                throw new PaywallError(`Paywall suspected: Content is short AND selector "${selector}" was found.`);
+                // throw new PaywallError(`Paywall suspected: Content is short AND selector "${selector}" was found.`);
+                 parserLogger.warn(`Potential Paywall detected but keeping content: ${selector}`);
             }
         }
     }
     // --- END NEW PAYWALL DETECTION ---
 
-    parserLogger.info(`Successfully extracted content. Title: "${title}", Length: ${cleanedContent.length}`);
+    // parserLogger.debug(`Successfully extracted content. Title: "${title}", Length: ${cleanedContent.length}`);
     return { title, content: cleanedContent, finalUrl: realUrl };
 }
 
@@ -80,22 +82,30 @@ async function _extractWithPuppeteer(realUrl) {
 }
 
 async function extractArticleText(realUrl) {
-    parserLogger.info(`Extracting content from real URL: ${realUrl}`);
+    // parserLogger.debug(`Extracting content from real URL: ${realUrl}`);
     try {
         // --- First attempt: Axios (fast) ---
-        parserLogger.debug(`Attempting extraction with Axios...`);
+        // parserLogger.debug(`Attempting extraction with Axios...`);
         const response = await axios.get(realUrl, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-                'Accept-Encoding': 'gzip, deflate, br, zstd',
-                'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
-                'DNT': '1',
+                // Diese Header sind entscheidend gegen Blockaden:
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9,de;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.google.com/',
                 'Upgrade-Insecure-Requests': '1',
-                'Referer': 'https://www.google.com/'
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'cross-site',
+                'Sec-Fetch-User': '?1',
+                'Pragma': 'no-cache',
+                'Cache-Control': 'no-cache'
             },
-            timeout: 30000,
-            maxRedirects: 10
+            timeout: 15000, 
+            maxRedirects: 5,
+            // Wichtig: Verhindert Fehler bei unvollständigen Zertifikats-Ketten
+            httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false })
         });
         return _parseHtmlWithCheerio(response.data, realUrl);
 
@@ -128,63 +138,50 @@ async function extractArticleText(realUrl) {
     }
 }
 
-// Source - https://stackoverflow.com/a
-// Posted by GTK
-// Retrieved 2025-11-24, License - CC BY-SA 4.0
 async function getArticleUrl(googleRssUrl) {
-    parserLogger.info(`Resolving Google News URL: ${googleRssUrl.substring(0, 100)}...`);
-    const response = await axios.get(googleRssUrl, { timeout: 10000 });
-    const $ = cheerio.load(response.data);
-    const data = $('c-wiz[data-p]').attr('data-p');
-    
-    if (!data) {
-        if (!googleRssUrl.includes('news.google.com')) {
-            parserLogger.warn(`'data-p' attribute not found for ${googleRssUrl}. Returning original URL.`);
-            return googleRssUrl;
+    try {
+        // parserLogger.debug(`[getArticleUrl] Resolving: ${googleRssUrl}`);
+
+        const response = await axios.get(googleRssUrl, { timeout: 15000 });
+        
+        const $ = cheerio.load(response.data);
+        const data = $('c-wiz[data-p]').attr('data-p');
+        if (!data) {
+             // This can happen if it's not a google url, which is fine, or if the page structure changed.
+            if (!googleRssUrl.includes('news.google.com')) {
+                return googleRssUrl;
+            }
+            throw new Error('Could not find attribute "data-p" in Google News page.');
         }
-        throw new Error('Could not find article data in Google News redirect page.');
-    }
 
-    const jsonString = data.replace('%.@.', '["garturlreq",');
-    let obj;
-    try {
-        obj = JSON.parse(jsonString);
-    } catch (e) {
-        parserLogger.error('Error parsing Google News data:', e);
-        throw e;
-    }
+        const obj = JSON.parse(data.replace('%.@.', '["garturlreq",'));
 
-    const payload = {
-      'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
-    };
+        const payload = {
+          'f.req': JSON.stringify([[['Fbv4je', JSON.stringify([...obj.slice(0, -6), ...obj.slice(-2)]), 'null', 'generic']]])
+        };
 
-    const headers = {
-      'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-    };
+        const headers = {
+          'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+        };
+        
+        const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers, timeout: 15000 });
+        
+        const rawDataString = postResponse.data.replace(")]}'", "");
+        const arrayString = JSON.parse(rawDataString)[0][2];
+        const articleUrl = JSON.parse(arrayString)[1];
+        
+        if (!articleUrl) {
+            throw new Error('Final article URL was null or undefined in the parsed response.');
+        }
+        // parserLogger.debug(`[getArticleUrl] Resolved to: ${articleUrl}`);
 
-    const postResponse = await axios.post('https://news.google.com/_/DotsSplashUi/data/batchexecute', payload, { headers, timeout: 10000 });
-    let arrayString;
-    try {
-        arrayString = JSON.parse(postResponse.data.replace(")]}'", ""))[0][2];
-    } catch (e) {
-        parserLogger.error('Error parsing batch execute response:', e);
-        throw e;
+        return articleUrl;
+    } catch (error) {
+        parserLogger.error(`[getArticleUrl] Failed to resolve ${googleRssUrl}. Error: ${error.message}`);
+        // Re-throw the error so the calling function knows it failed
+        throw error;
     }
-    
-    let articleUrl;
-    try {
-        articleUrl = JSON.parse(arrayString)[1];
-    } catch (e) {
-        parserLogger.error('Error parsing article URL from array:', e);
-        throw e;
-    }
-
-    if (!articleUrl) {
-        throw new Error('Failed to extract final article URL from batch execute response.');
-    }
-    parserLogger.info(`Resolved to final URL: ${articleUrl}`);
-    return articleUrl;
 }
 
 
