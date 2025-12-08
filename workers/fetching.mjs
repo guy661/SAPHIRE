@@ -8,7 +8,7 @@ import { Logger, EMOJIS } from '../utils.js';
 const logger = new Logger('FetchAllWorker', 'blue', EMOJIS.fetch);
 const bullLogger = new Logger('BullMQ', 'red', EMOJIS.bull);
 
-const { semanticQueue } = queues;
+const { synthesisQueue } = queues;
 
 const worker = new BullMQWorker('fetch-all', async (job) => {
     const { jobId, articles, user_intent, language, userId, dashboardId } = job.data;
@@ -24,9 +24,9 @@ const worker = new BullMQWorker('fetch-all', async (job) => {
 
                 // FIX: Pre-resolve Google News URLs before extracting content
                 if (article.link.includes('news.google.com')) {
-                    logger.debug(`Resolving Google URL for "${article.title}"...`);
+                    // logger.debug(`Resolving Google URL for "${article.title}"...`);
                     targetUrl = await getArticleUrl(article.link);
-                    logger.debug(`Resolved "${article.title}" to: ${targetUrl}`);
+                    // logger.debug(`Resolved "${article.title}" to: ${targetUrl}`);
                 }
                 
                 const content = await extractArticleText(targetUrl);
@@ -49,10 +49,10 @@ const worker = new BullMQWorker('fetch-all', async (job) => {
             return;
         }
         
-        
-        logger.info(`Successfully fetched ${successfullyFetched.length}/${articles.length} articles. Queuing for semantic check.`);
+        logger.info(`Successfully fetched ${successfullyFetched.length}/${articles.length} articles. Queuing for synthesis.`);
 
-        await semanticQueue.add('semantic-summary', {
+        // Push to SYNTHESIS queue
+        await synthesisQueue.add('synthesize', {
             jobId: jobId,
             dashboardId: dashboardId,
             userId: userId,
@@ -61,9 +61,9 @@ const worker = new BullMQWorker('fetch-all', async (job) => {
             language: language
         });
 
-        await db.updateJobStatus(jobId, 'semantic_check');
+        await db.updateJobStatus(jobId, 'synthesizing');
 
-        logger.info(`Job ${job.id}: Successfully queued for semantic check.`);
+        logger.info(`Job ${job.id}: Successfully queued for synthesis.`);
         return { success: true, fetchedCount: successfullyFetched.length };
 
     } catch (err) {

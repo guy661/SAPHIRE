@@ -4,6 +4,7 @@ require('dotenv').config();
 const db = require('./database-postgres.js');
 const { generateSearchQueriesTask, generateGeneralKeywordsTask } = require('./task.js');
 const { getAggregatedFeed } = require('./rss-aggregator.js');
+const { filterArticlesByRelevanceLocal } = require('./local-ai.js'); // Import local AI
 const { randomUUID } = require('crypto');
 const fetch = require('node-fetch');
 const Parser = require('rss-parser');
@@ -15,7 +16,7 @@ const parser = new Parser();
 // This function is now self-contained and can be imported anywhere.
 async function startSearchJob(dashboardId, userId, rssCategories = []) {
     const queuesModule = await import('./queues.mjs');
-    const { fetchAllQueue } = queuesModule.default; // Changed from synthesisQueue
+    const { semanticQueue } = queuesModule.default; // Changed from fetchAllQueue to semanticQueue
 
     const dashboard = await db.getDashboardById(dashboardId);
     if (!dashboard || dashboard.user_id !== userId) {
@@ -31,59 +32,46 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
     // Determine the "since" date for filtering
     const lastJob = await db.getLatestCompletedJobForDashboard(dashboardId);
     let minDate = null;
+    let previousSummary = null; // Store previous summary for redundancy check
+    
     if (lastJob) {
-        minDate = lastJob.created_at;
-        jobLogger.info(`Found previous job from ${minDate}. Filtering articles older than this.`);
+        // Dynamic Buffer Logic
+        const intervalMinutes = dashboard.interval_minutes && dashboard.interval_minutes > 0 ? dashboard.interval_minutes : 0;
+        const bufferMinutes = intervalMinutes > 0 ? Math.floor(intervalMinutes * 0.5) : 720; 
+        
+        const lastJobDate = new Date(lastJob.created_at);
+        minDate = new Date(lastJobDate.getTime() - (bufferMinutes * 60000)); 
+        
+        // Use the meta_summary from the last job directly
+        if (lastJob.meta_summary) {
+            previousSummary = lastJob.meta_summary;
+        }
+
+        jobLogger.info(`Found previous job from ${lastJobDate.toLocaleString()}. effectiveMinDate: ${minDate.toLocaleString()}`);
     } else {
-        // Default to 48 hours ago if no previous job
+        // Default to 7 days (1 week) ago if no previous job (First Run)
         const d = new Date();
-        d.setHours(d.getHours() - 48);
+        d.setHours(d.getHours() - 168); // 7 * 24 = 168 hours
         minDate = d;
-        jobLogger.info(`No previous job found. Filtering articles older than 48 hours (${minDate}).`);
+        jobLogger.info(`No previous job found (First Run). Filtering articles older than 7 days (${minDate.toLocaleString()}).`);
     }
 
-    // Determine search terms (use stored ones if available, otherwise generate and save)
-    let storedSearchTerms = dashboard.search_terms && Array.isArray(dashboard.search_terms) ? dashboard.search_terms : [];
+    // We rely on Semantic AI filtering locally now.
+    // We disable the dumb keyword filter by passing empty object.
+    const searchTerms = {}; 
     
-    if (storedSearchTerms.length === 0) {
-        jobLogger.info(`No stored search terms found. Generating new ones via AI...`);
-        try {
-            storedSearchTerms = await generateGeneralKeywordsTask({ 
-                data: { user_intent: dashboard.user_intent, language: user.language || 'de' } 
-            });
-            
-            if (storedSearchTerms.length > 0) {
-                await db.updateDashboardSearchTerms(dashboardId, storedSearchTerms);
-                jobLogger.info(`Generated and saved new search terms: [${storedSearchTerms.join(', ')}]`);
-            } else {
-                jobLogger.warn(`AI failed to generate search terms.`);
-            }
-        } catch (err) {
-            jobLogger.error(`Error generating search terms: ${err.message}`);
-        }
-    } else {
-        jobLogger.info(`Using stored search terms for pre-filtering: [${storedSearchTerms.join(', ')}]`);
-    }
+    // const hasKeywords = Object.keys(searchTerms).length > 0 && Object.values(searchTerms).some(arr => arr && arr.length > 0);
+    jobLogger.info(`Fetching articles since ${minDate.toLocaleString()}. Will use LOCAL AI for semantic pre-filtering.`);
 
     // --- Google News Search Promise ---
     const googleNewsPromise = async () => {
-        let searchQueries = [];
-        
-        // Use stored terms if available (now they should be), otherwise fallback to complex query generation
-        if (storedSearchTerms.length > 0) {
-             searchQueries = storedSearchTerms;
-        } else {
-             // Fallback if generation above failed completely
-             // jobLogger.info('Generating smart search queries from user intent...');
-             searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' } });
-             // jobLogger.info(`Generated queries: [${searchQueries.join(', ')}]`);
-        }
+        // Since we have no stored keywords, we ALWAYS generate fresh queries for Google News based on intent
+        // This is specific to Google News as it REQUIRES a query string.
+        let searchQueries = await generateSearchQueriesTask({ data: { user_intent: dashboard.user_intent, language: user.language || 'de' } });
 
         const googleArticles = new Map();
         for (const query of searchQueries) {
-            // jobLogger.info(`Performing Google News search for: "${query}"`);
             const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=${user.language}&gl=DE&ceid=DE:${user.language}`;
-
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 10000);
 
@@ -96,13 +84,8 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
                 const xml = await response.text();
                 const feed = await parser.parseString(xml);
                 feed.items.slice(0, 10).forEach(article => {
-                    // Additional date check for Google News items
-                    if (minDate && article.pubDate && new Date(article.pubDate) <= new Date(minDate)) {
-                        return;
-                    }
-
+                    if (minDate && article.pubDate && new Date(article.pubDate) <= new Date(minDate)) return;
                     if (article.link && !googleArticles.has(article.link)) {
-                        // Add the source name for Google News articles
                         article.sourceName = 'Google News';
                         googleArticles.set(article.link, article);
                     }
@@ -116,10 +99,8 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
 
     // --- Custom RSS Feed Promise ---
     const customRssPromise = async () => {
-        // The aggregator itself will handle the case of an empty category array by fetching all feeds.
-        // jobLogger.info(`Performing custom RSS search for categories: [${rssCategories.join(', ')}]`);
-        // Pass the ensured storedSearchTerms
-        return getAggregatedFeed(rssCategories, minDate, storedSearchTerms);
+        // Fetch ALL items from the feeds, filtered ONLY by date (no keywords)
+        return getAggregatedFeed(rssCategories, minDate, {}); 
     };
 
     // --- Execute and Combine with Priority ---
@@ -132,39 +113,49 @@ async function startSearchJob(dashboardId, userId, rssCategories = []) {
             allArticles.set(article.link, article);
         }
     });
-    // jobLogger.info(`Found ${allArticles.size} articles from custom RSS feeds.`);
 
-    // 2. Add Google News articles as a supplement
+    // 2. Add Google News articles
     const googleArticles = await googleNewsPromise();
     googleArticles.forEach(article => {
         if (article && article.link && !allArticles.has(article.link)) {
             allArticles.set(article.link, article);
         }
     });
-    // jobLogger.info(`Total unique articles after adding Google News: ${allArticles.size}.`);
 
-    const articlesToCheck = Array.from(allArticles.values()).slice(0, 50);
-    jobLogger.info(`Found a total of ${articlesToCheck.length} unique articles from all sources.`);
+    // Original raw candidates
+    let articlesToCheck = Array.from(allArticles.values());
+    jobLogger.info(`Found a total of ${articlesToCheck.length} raw articles. Running Local AI Semantic Filter...`);
+
+    // --- LOCAL AI FILTERING ---
+    // This reduces the 27k+ articles to the top 1000 most relevant ones based on vector similarity
+    // running entirely on CPU without external API costs.
+    try {
+        articlesToCheck = await filterArticlesByRelevanceLocal(articlesToCheck, dashboard.user_intent, 1000);
+        jobLogger.info(`Local AI Filter kept top ${articlesToCheck.length} semantically relevant articles.`);
+    } catch (err) {
+        jobLogger.error("Local AI Filter failed, falling back to raw date slicing:", err);
+        articlesToCheck = articlesToCheck.slice(0, 1000);
+    }
 
     if (articlesToCheck.length === 0) {
-        jobLogger.info(`No articles found for dashboard ${dashboardId}. Job not created.`);
+        jobLogger.info(`No articles found for dashboard ${dashboardId} in the given time window.`);
         return null;
     }
 
     const jobId = randomUUID();
-    await db.createJob(jobId, dashboardId, 'pending'); // Set initial status to pending/queued
+    await db.createJob(jobId, dashboardId, 'pending');  
 
-    // Add a single job to the fetch-all queue with all articles
-    await fetchAllQueue.add('fetch-all', {
+    // Add to semantic queue with reference to previous summary for redundancy check
+    await semanticQueue.add('semantic-summary', {
         jobId: jobId,
         dashboardId: dashboardId,
         userId: userId,
         articles: articlesToCheck,
         user_intent: dashboard.user_intent,
-        language: user.language || 'de'
+        language: user.language || 'de',
+        previousSummary: previousSummary // Pass this down
     });
 
-    jobLogger.info(`Job ${jobId} created. Queued a fetch-all task with ${articlesToCheck.length} articles for dashboard ${dashboardId}.`);
     return jobId;
 }
 

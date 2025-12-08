@@ -146,7 +146,7 @@ const generateSearchQueriesTask = async ({ data: { user_intent, language = 'de' 
     const prompt = (genQueryPrompts[language] || genQueryPrompts['de'])(user_intent);
     
     try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5);
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.5, true);
         // taskLogger.debug(`Raw AI query generation response: ${responseString}`);
         
         const jsonMatch = responseString.match(/\{.*\}/s);
@@ -184,17 +184,21 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
     const previousTopicIds = userContext.previousClusterIds || [];
 
     // --- 2. Prepare Today's Topics ---
-    const todayTopics = articles.map(a => ({
-        id: a.clusterId,
-        title: a.fetchedContent.title,
-        summary: a.fetchedContent.content
-    }));
+    const todayTopics = articles.map(a => {
+        // Find source name either in top level or fetched content
+        const source = a.sourceName || (a.fetchedContent ? a.fetchedContent.source : 'Unbekannte Quelle');
+        return {
+            title: a.fetchedContent.title,
+            summary: a.fetchedContent.content,
+            source: source
+        };
+    });
 
     const continuingTopics = todayTopics.filter(t => previousTopicIds.includes(t.id));
     const newTopics = todayTopics.filter(t => !previousTopicIds.includes(t.id));
 
     // --- 3. Build Prompt Components ---
-    const formatTopics = (topicArray) => topicArray.length > 0 ? topicArray.map(t => `- "${t.title}": ${t.summary}`).join('\n') : 'Keine.';
+    const formatTopics = (topicArray) => topicArray.length > 0 ? topicArray.map(t => `- [Quelle: ${t.source}] "${t.title}": ${t.summary}`).join('\n') : 'Keine.';
     
     const likedTopicsString = likedTopicTitles.length > 0 ? likedTopicTitles.map(t => `- ${t}`).join('\n') : 'Keine bekannt.';
     const dislikedTopicsString = dislikedTopicTitles.length > 0 ? dislikedTopicTitles.map(t => `- ${t}`).join('\n') : 'Keine bekannt.';
@@ -202,7 +206,7 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
     const newTopicsString = formatTopics(newTopics);
     
     const previousSummarySection = previousSummary 
-        ? `**VORHERIGES BRIEFING (Kontext):**\n"${previousSummary.substring(0, 3000)}..."\n(Nutze dies, um Wiederholungen zu vermeiden und auf Veränderungen hinzuweisen.)`
+        ? `**VORHERIGES BRIEFING (Kontext):**\n"${previousSummary.substring(0, 3000)}"...\n(Nutze dies, um Wiederholungen zu vermeiden und auf Veränderungen hinzuweisen.)`
         : `**VORHERIGES BRIEFING:** Keines vorhanden (Dies ist das erste Briefing).`;
 
     const synthesisPrompts = {
@@ -220,55 +224,41 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
 
             ${previousSummarySection}
 
-            **VERFÜGBARE NEUE INFORMATIONEN (seit dem letzten Briefing):**
-            ${continuingTopicsString}
-            ${newTopicsString}
+            **VERFÜGBARE QUELLEN (Neue Artikel):**
+            ${formatTopics(todayTopics)}
             
-            **DEINE ANWEISUNGEN - Folge diesen Regeln strikt:**
-            1.  **INKREMENTELLES UPDATE:** Wenn ein Thema bereits im vorherigen Briefing behandelt wurde, schreibe nur über die **neuen Entwicklungen**. Referenziere das vorherige Wissen des Kunden.
-            2.  **NEUE THEMEN:** Führe Themen, die im vorherigen Briefing gar nicht vorkamen, als neu ein.
-            3.  **PERSONALISIEREN & PRIORISIEREN:**
-                - Themen, die den "Likes" des Kunden ähneln, sollten prominenter und ausführlicher behandelt werden.
-                - Themen, die den "Dislikes" ähneln, sollten nur kurz erwähnt oder ganz weggelassen werden.
-            4.  **SYNTHETISIEREN & ANALYSIEREN (ALLES IM FLIESSTEXT):**
-                - Webe alle Informationen zu einem einzigen, flüssigen Text zusammen.
-                - **Integriere den Faktencheck und die Medien-Bewertung direkt in den Satzbau.** Wenn Quellen widersprüchlich sind, nenne das konkret ("Während Quelle X behauptet..., weist Quelle Y darauf hin...").
-                - **Bewerte Tonalität und Bias:** Wenn die Berichterstattung auffällig emotional oder einseitig ist, erwähne das subtil im Text (z.B. "Die Berichterstattung hierzu ist auffällig alarmistisch..." oder "Beobachter aus dem konservativen Spektrum werten dies als...").
-                - Erstelle KEINE separaten Listen oder "Analyse"-Boxen. Alles ist ein durchgehender Text.
-            5.  **STRUKTUR:** Gib dem Briefing eine starke Hauptüberschrift und ein "Kern-Briefing" (2-3 Sätze) am Anfang.
+            **ANWEISUNGEN:**
+            1.  **Quellen-Nennung im Fluss:** Du MUSST die Quellen der Informationen natürlich in den Text einbauen (z.B. "Wie der *Spiegel* berichtet...", "Laut *Reuters*...", "Die *Tagesschau* meldet, dass...").
+            2.  **Synthese:** Fasse verschiedene Quellen zu einem Thema zusammen. Wenn sie sich widersprechen, nenne den Widerspruch unter Angabe der Quellen.
+            3.  **Keine Listen:** Schreibe einen gut lesbaren Fließtext (Artikel-Stil), keine Aufzählungszeichen für die Hauptinhalte.
+            4.  **Priorisierung:** Starte mit dem Wichtigsten. Ignoriere Themen, die den "Dislikes" entsprechen.
+            5.  **Struktur:** Gib dem Ganzen eine passende Überschrift.
 
-            Erstelle nun das inkrementelle, persönliche Briefing auf Deutsch.
+            Erstelle nun das Briefing auf Deutsch.
         `,
         'en': `
-            You are a personal Chief News Analyst. Your task is to create an extremely relevant, evolving, and personalized briefing for a busy client.
-
-            **MOST IMPORTANT RULE:** The client hates redundancy. If information was already in the "Previous Briefing", DO NOT repeat it unless there is a significant update. Focus on the changes (deltas) and new news.
+            You are a professional news analyst. Create a concise, flowing briefing for your client.
 
             **CLIENT PROFILE:**
-            - **General Interest:** "${user_intent}"
-            - **Preferred Topics (Likes):**\n${likedTopicsString}
-            - **Ignorierte Themen (Dislikes):**\n${dislikedTopicsString}
+            - **Interest:** "${user_intent}"
+            - **Likes:** ${likedTopicsString}
+            - **Dislikes:** ${dislikedTopicsString}
 
             **TODAY'S DATE:** ${currentDate}
 
             ${previousSummarySection}
 
-            **AVAILABLE NEW INFORMATION (since last briefing):**
-            ${continuingTopicsString}
-            ${newTopicsString}
+            **AVAILABLE SOURCES (New Articles):**
+            ${formatTopics(todayTopics)}
             
-            **YOUR INSTRUCTIONS - Follow these rules strictly:**
-            1.  **INCREMENTAL UPDATE:** If a topic was already covered in the previous briefing, write ONLY about the **new developments**. Reference the client's prior knowledge.
-            2.  **NEW TOPICS:** Introduce topics that did not appear in the previous briefing as new.
-            3.  **PERSONALIZE & PRIORITIZE:** Highlight liked topics. Downplay disliked topics.
-            4.  **SYNTHESIZE & ANALYZE (ALL IN RUNNING TEXT):**
-                - Weave everything into a single fluid text.
-                - **Integrate fact-checking and media evaluation directly into the sentences.** If sources conflict, state it ("While Source X claims..., Source Y points out...").
-                - **Assess Tone and Bias:** If reporting is notably emotional or biased, mention it subtly in the text (e.g., "Reporting on this has been notably alarmist..." or "Conservative observers interpret this as...").
-                - DO NOT create separate lists or "analysis" boxes. Everything is one cohesive narrative.
-            5.  **STRUKTUR:** Strong headline and "Core Briefing" summary at the top.
+            **INSTRUCTIONS:**
+            1.  **In-Text Citations:** You MUST cite the sources of information naturally within the flow of the text (e.g., "As reported by *The Guardian*...", "According to *Reuters*...", "*CNN* notes that...").
+            2.  **Synthesis:** Combine different sources on the same topic. If they contradict, state the conflict with sources.
+            3.  **No Lists:** Write in a readable narrative style (article style), avoid bullet points for the main content.
+            4.  **Prioritization:** Start with the most important news. Ignore topics matching "Dislikes".
+            5.  **Structure:** Provide a suitable headline.
 
-            Now, create the incremental, personal briefing in English.
+            Create the briefing now in English.
         `
     };
 
@@ -284,9 +274,6 @@ const generateSynthesizedSummaryTask = async ({ data }) => {
         throw new Error(`Failed to generate context-aware synthesized summary: ${error.message}`);
     }
 };
-
-// ... (the rest of the file, generateFollowUpAnswerTask etc., remains the same)
-
 
 const generateFollowUpAnswerTask = async ({ data: { question, chatHistory, summary, language = 'de' } }) => {
     // taskLogger.info(`Generating follow-up answer for question: "${question.substring(0, 50)}"...`);
@@ -438,54 +425,67 @@ const generateClusterAnalysisTask = async ({ data: { articles, user_intent, lang
     }
 };
 
-const semanticClusteringTask = async ({ data: { articles, user_intent, language = 'de' } }) => {
-    // articles expects array of { id, title, content }
+const semanticClusteringTask = async ({ data: { articles, user_intent, language = 'de', currentDate, lastSummaryTime, previousSummary } }) => {
+    // articles expects array of { id, title, content, sourceName }
     
     // Limit content per article to save tokens, title is most important for clustering often
-    const articlesText = articles.map((a, index) => 
-        `[ID: ${index}] TITEL: ${a.fetchedContent.title}\nTEASER: ${a.fetchedContent.content.substring(0, 300)}...`
-    ).join('\n\n');
+    const articlesText = articles.map((a, index) => {
+        const title = a.title || (a.fetchedContent ? a.fetchedContent.title : 'No Title');
+        const source = a.sourceName || 'Unknown Source';
+        // Fallback chain for teaser text
+        let teaser = '';
+        if (a.fetchedContent && a.fetchedContent.content) {
+            teaser = a.fetchedContent.content.substring(0, 300);
+        } else if (a.contentSnippet) {
+            teaser = a.contentSnippet.substring(0, 300);
+        } else if (a.snippet) {
+             teaser = a.snippet.substring(0, 300);
+        }
+        
+        return `[ID: ${index}] QUELLE: ${source} | TITEL: ${title}\nTEASER: ${teaser}...`;
+    }).join('\n\n');
 
     const prompt = `
-        Du bist ein **empathischer, hochintelligenter persönlicher News-Kurator**. Deine Aufgabe ist es nicht einfach nur, Nachrichten zu sortieren, sondern den **wahren Willen und die tieferliegende Absicht** des Nutzers zu verstehen und Artikel darauf basierend zu bewerten.
+        Du bist der **Chefredakteur** eines hochgradig personalisierten Nachrichtendienstes. 
+        Deine Aufgabe ist es, aus einer großen Menge an eingehenden Meldungen (Headlines) NUR die Perlen herauszufischen, die für deinen Kunden WIRKLICH relevant und NEU sind.
 
-        **DIE ABSICHT DES NUTZERS (Dein Kompass):**
-        "${user_intent}"
+        **DEIN KUNDE (Profil):**
+        *   **Interessen:** "${user_intent}"
+        *   **Letztes Briefing (Was er schon weiß):** "${previousSummary ? previousSummary.substring(0, 1000) + '...' : 'NICHTS (Dies ist das erste Briefing)'}"
+        *   **HEUTE:** ${currentDate || 'Unbekannt'}
+
+        **DEINE AUFGABE (Der Filter-Prozess):**
+        Gehe jeden Artikel durch und entscheide hart:
+        1.  **Relevanz:** Passt das Thema *wirklich* zum Interesse? (Keine weit entfernten Assoziationen).
+        2.  **Aktualität & Redundanz (Der "Kalter Kaffee"-Check):**
+            *   Ist das eine **neue Entwicklung** oder erzählt es nur das nach, was schon im "Letzten Briefing" stand?
+            *   Wenn der Artikel nur alte Fakten wiederkäut -> **AUSSORTIEREN.**
+            *   Wenn es ein echtes Update ist -> **BEHALTEN.**
 
         **Deine Artikel-Liste:**
         ${articlesText}
 
-        **DEINE AUFGABE:**
-        1.  **Tiefes Verständnis:** Versetze dich vollständig in die Lage des Nutzers. Frage dich bei jedem Artikel: *"Würde mein Nutzer, mit genau DIESEM spezifischen Interesse und Mindset, diesen Artikel lesen wollen?"*
-        2.  **Kein bloßes Keyword-Matching:** Sei NICHT starr. Ein Artikel kann hochrelevant sein, auch wenn er keine Keywords aus der User-Absicht enthält, solange er den **Kontext**, die **Folgen** oder **verwandte Aspekte** beleuchtet.
-            *   *Beispiel:* Wenn der Nutzer "Fußball-Bundesliga" mag, ist auch ein Artikel über "TV-Rechte-Vergabe" relevant, auch wenn kein Spielbericht enthalten ist.
-            *   *Beispiel:* Wenn der Nutzer "KI-Entwicklung" verfolgt, ist auch ein Artikel über "Neue Chip-Fabriken" relevant.
-        3.  **Großzügige Relevanz:** Im Zweifel für den Nutzer. Wenn ein Thema auch nur im Entferntesten interessant sein könnte, markiere es als 'is_relevant_to_intent: true'. Nur völlig abwegige Themen (Spam, komplett andere Welt) sind 'false'.
-        4.  **Clustering:** Gruppiere ALLE Artikel. Jeder Artikel muss zwingend einem Cluster zugeordnet werden.
-        5.  **Titel:** Gib jedem Cluster einen prägnanten Titel.
-
-        **Antworte AUSSCHLIESSLICH mit diesem JSON-Format:**
+        **Antworte AUSSCHLIESSLICH mit diesem JSON-Format (Gruppiere Zusammengehöriges):**
         {
             "clusters": [
                 {
-                    "title": "Titel des Themas",
-                    "article_ids": [0, 5, 12],
-                    "is_relevant_to_intent": true, // Deine empathische Entscheidung
-                    "reason": "Kurze Begründung, warum das Thema für den Nutzer relevant (oder irrelevant) ist."
+                    "title": "Aussagekräftiger Titel für dieses Thema",
+                    "article_ids": [0, 5], 
+                    "is_relevant_to_intent": true, 
+                    "reason": "Top-aktuell: Neue Entwicklung zu X, die im letzten Briefing noch nicht stand."
                 },
                 {
-                    "title": "Thema das der Nutzer sicher NICHT sehen will",
+                    "title": "Thema Y",
                     "article_ids": [1],
                     "is_relevant_to_intent": false,
-                    "reason": "Begründung der Ablehnung."
+                    "reason": "Redundant: War schon im letzten Briefing bekannt / Veraltet."
                 }
             ]
         }
     `;
 
     try {
-        // Use a slightly higher temperature for creative grouping
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.2);
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error("No JSON found");
         
@@ -500,30 +500,34 @@ const semanticClusteringTask = async ({ data: { articles, user_intent, language 
 
 const selectCategoriesTask = async ({ data: { user_intent, categories, language = 'de' } }) => {
     // categories is an object where keys are IDs and values have names/descriptions
-    const categoryList = Object.entries(categories).map(([key, cat]) => `- ID: "${key}" -> ${cat.name}`).join('\n');
+    const categoryList = Object.entries(categories).map(([key, cat]) => {
+        return `- ID: "${key}"\n  NAME: ${cat.name}\n  INHALT: ${cat.description || 'Keine Beschreibung'}`;
+    }).join('\n\n');
 
     const prompt = `
-        Du bist ein News-Kurator. Deine Aufgabe ist es, basierend auf dem Interesse eines Nutzers die passenden Nachrichten-Kategorien aus einer verfügbaren Liste auszuwählen.
+        Du bist ein extrem präziser News-Filter. Deine Aufgabe ist es, für einen Nutzer NUR die Nachrichten-Kategorien auszuwählen, die **eindeutig** zu seinem Interesse passen.
 
         **Nutzer-Interesse:** "${user_intent}"
 
-        **Verfügbare Kategorien:**
+        **Verfügbare Kategorien (und ihr Inhalt):**
         ${categoryList}
 
-        **Deine Aufgabe:**
-        1. Wähle ALLE Kategorien aus, die für das Nutzer-Interesse relevant sein könnten.
-        2. Sei lieber etwas großzügiger als zu restriktiv, damit dem Nutzer keine wichtigen Nachrichten entgehen.
-        3. Wenn das Interesse sehr breit ist (z.B. "Alles Wichtige"), wähle diverse Hauptkategorien (Politik, Wirtschaft, etc.).
-        4. Gib mindestens 1 Kategorie zurück.
+        **DEINE STRENGE ANWEISUNG (Das Ausschluss-Prinzip):**
+        1.  Lies die "INHALT"-Beschreibung jeder Kategorie genau.
+        2.  Wähle eine Kategorie NUR DANN aus, wenn sie thematisch **direkt** passt.
+        3.  **Vermeide "Rauschen":** 
+            - Wenn der Nutzer "Politik im Iran" will, wähle KEINE "Gaming"- oder "Tech"-Kategorien aus, nur weil dort das Wort "Welt" vorkommen könnte.
+            - Wenn der Nutzer "Tech News" will, wähle KEINE "Sport"-Kategorien.
+        4.  Sei lieber zu restriktiv als zu offen. Falsche Kategorien ruinieren das Ergebnis.
 
         **Antworte AUSSCHLIESSLICH mit einem JSON-Objekt:**
         {
-            "selected_category_ids": ["id1", "id3", "id5"]
+            "selected_category_ids": ["id1", "id3"]
         }
     `;
 
     try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.1); // Low temp for precision
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error("No JSON found");
         
@@ -531,41 +535,50 @@ const selectCategoriesTask = async ({ data: { user_intent, categories, language 
         return result.selected_category_ids || [];
     } catch (error) {
         taskLogger.error('Error selecting categories', error);
-        // Fallback: Return all keys if AI fails, to be safe? Or just empty to force retry? 
-        // Better to return empty and handle upstream, or return a default set.
         return [];
     }
 };
 
 const generateGeneralKeywordsTask = async ({ data: { user_intent, language = 'de' } }) => {
     const prompt = `
-        Du bist ein Experte für Such-Algorithmen. Deine Aufgabe ist es, für eine gegebene Nutzer-Intention eine Liste von **allgemeinen Schlüsselwörtern** zu erstellen, die für eine **Vorfilterung von RSS-Feeds** verwendet werden können.
+        Du bist ein Such-Algorithmus-Experte. Deine Aufgabe ist es, für eine gegebene Nutzer-Intention **5-10 sehr breite Suchbegriffe (Keywords)** zu generieren. 
+        Diese Begriffe werden als **Vorfilter** für einen RSS-Feed verwendet.
 
         **Nutzer-Intention:** "${user_intent}"
 
-        **Deine Aufgabe:**
-        1.  Analysiere das Thema.
-        2.  Erstelle eine Liste von 3 bis 6 **Schlüsselwörtern oder kurzen Phrasen**.
-        3.  **WICHTIG:** Jedes Keyword darf **MAXIMAL 2 WÖRTER** lang sein (z.B. "KI", "Künstliche Intelligenz", "Bundestag", "US-Wahl").
-        4.  Die Begriffe müssen **allgemein genug** sein, um in Headlines von relevanten Artikeln vorzukommen (keine zu spezifischen Nische-Begriffe).
-        5.  Antworte auf Deutsch (oder Englisch, wenn der User-Intent englisch ist).
+        **Deine strikten Regeln:**
+        1.  **MAXIMAL 2 WÖRTER pro Keyword.** (Kürzer ist besser).
+        2.  **NICHT ZU SPEZIFISCH:** Wähle Begriffe, die breit genug sind, um alle relevanten Artikel zu fangen ("Netz" statt "Spinnennetz").
+        3.  **Sprachen:** Generiere Keywords für Deutsch ("de") UND Englisch ("en"), da wir internationale Quellen durchsuchen.
+        4.  **Keine Nischen-Namen**, es sei denn, sie sind das Hauptthema.
+
+        **Beispiel:**
+        - Intent: "Ich will alles über die US-Wahlen wissen"
+        - Gut (DE): ["US-Wahl", "Trump", "Harris", "USA", "Wahlkampf"]
+        - Gut (EN): ["US Election", "Trump", "Harris", "USA", "Campaign"]
+        - Schlecht: "Auswirkung der Wahl in Pennsylvania" (Zu lang/spezifisch)
 
         **Antworte AUSSCHLIESSLICH mit diesem JSON-Format:**
         {
-            "keywords": ["Begriff 1", "Begriff 2", "Begriff 3"]
+            "de": ["Begriff1", "Begriff2"],
+            "en": ["Term1", "Term2"]
         }
     `;
 
     try {
-        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.3);
+        const responseString = await callGemini(prompt, 'gemini-2.5-flash', 0.4, true);
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error("No JSON found");
         
         const result = JSON.parse(jsonMatch[0]);
-        return result.keywords || [];
+        // Ensure structure is correct (flat arrays for de/en)
+        return {
+            de: Array.isArray(result.de) ? result.de : [],
+            en: Array.isArray(result.en) ? result.en : []
+        };
     } catch (error) {
         taskLogger.error('Error generating general keywords', error);
-        return [];
+        return { de: [], en: [] };
     }
 };
 

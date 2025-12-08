@@ -64,92 +64,185 @@ class Logger {
     }
 }
 
-const apiKeys = (process.env.GEMINI_API_KEYS || '').split(',').filter(Boolean);
+const apiKeys = (process.env.GEMINI_API_KEYS || '').split(',').filter(Boolean).map(k => k.trim());
 const apiInstances = apiKeys.map(key => new GoogleGenerativeAI(key));
 
 // --- Global Rate Limiting State ---
 const apiKeyRequestTimestamps = apiKeys.map(() => []);
-const REQUEST_LIMIT_PER_MINUTE = 10;
+const REQUEST_LIMIT_PER_MINUTE = 14; // Gemini Free is 15 RPM, keep safety buffer
 const TIME_WINDOW_MS = 60000;
-let apiKeyIndex = 0; // Used as a starting point for the search to ensure rotation
+let apiKeyIndex = 0; 
 const rateLimitLogger = new Logger('RateLimiter', 'yellow', '⏳');
+
+// Helper to artificially exhaust a key if we get a 429
+function markKeyAsBusy(index) {
+    const now = Date.now();
+    // Fill it up with timestamps from 'now' so it won't be used for a minute
+    const currentTimestamps = apiKeyRequestTimestamps[index];
+    const needed = REQUEST_LIMIT_PER_MINUTE - currentTimestamps.length;
+    for(let i=0; i < needed + 1; i++) {
+        currentTimestamps.push(now);
+    }
+}
 
 async function getNextAvailableApiClient() {
     if (apiInstances.length === 0) {
         throw new Error('No API keys provided for Gemini.');
     }
 
+    // Try finding a key multiple times to handle race conditions or rapid exhaustion
     while (true) {
         let earliestNextAvailableTime = Infinity;
+        let bestCandidateIndex = -1;
 
         for (let i = 0; i < apiInstances.length; i++) {
             const currentIndex = (apiKeyIndex + i) % apiInstances.length;
             const timestamps = apiKeyRequestTimestamps[currentIndex];
             const now = Date.now();
 
-            // Remove timestamps older than the time window
+            // Clean up old timestamps
             while (timestamps.length > 0 && now - timestamps[0] > TIME_WINDOW_MS) {
                 timestamps.shift();
             }
 
-            // If the key is under the limit, use it
             if (timestamps.length < REQUEST_LIMIT_PER_MINUTE) {
-                timestamps.push(now);
-                apiKeyIndex = (currentIndex + 1) % apiInstances.length; // Set next starting point
-                return apiInstances[currentIndex];
+                timestamps.push(now); // Reserve slot
+                apiKeyIndex = (currentIndex + 1) % apiInstances.length;
+                return { client: apiInstances[currentIndex], index: currentIndex };
             }
 
-            // Otherwise, calculate the earliest time this key will be available again
-            const nextAvailableTime = timestamps[0] + TIME_WINDOW_MS;
-            if (nextAvailableTime < earliestNextAvailableTime) {
-                earliestNextAvailableTime = nextAvailableTime;
+            // Track wait time
+            const nextFree = timestamps[0] + TIME_WINDOW_MS;
+            if (nextFree < earliestNextAvailableTime) {
+                earliestNextAvailableTime = nextFree;
             }
         }
 
-        // If all keys are busy, wait 61 seconds to fully reset the window
-        // const waitTime = earliestNextAvailableTime - Date.now() + 50; // +50ms buffer
-        const waitTime = 61000;
-        if (waitTime > 0) {
-            rateLimitLogger.warn(`All API keys are busy. Waiting for 61s...`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
-        }
+        // All keys busy. Wait intelligently.
+        const now = Date.now();
+        const waitTime = Math.max(1000, earliestNextAvailableTime - now + 100); // at least 1s, plus buffer
+        
+        rateLimitLogger.warn(`All ${apiInstances.length} API keys busy. Waiting ${Math.ceil(waitTime/1000)}s...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime));
     }
 }
-// --- End of Global Rate Limiting ---
 
-function getApiKeyCount() {
-    return apiKeys.length;
-}
+async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, jsonMode = false) {
+    const fallbackModel = 'gemini-2.0-flash-lite-preview-02-05';
+    let currentModel = model;
+    let retries = 0;
+    const maxRetries = 10; 
 
-async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, maxOutputTokens = 2048) {
-    return retry(async () => {
-        const genAI = await getNextAvailableApiClient();
-        const generativeModel = genAI.getGenerativeModel({ model });
-        const result = await generativeModel.generateContent(prompt);
-        const response = await result.response;
-        return response.text();
-    }, 3, 2000, 'Gemini call failed');
+    while (retries < maxRetries) {
+        let currentKeyIndex = -1;
+        try {
+            const { client, index } = await getNextAvailableApiClient();
+            currentKeyIndex = index;
+            
+            const config = { 
+                model: currentModel,
+                generationConfig: {
+                    temperature: temperature,
+                    maxOutputTokens: 2048,
+                    responseMimeType: jsonMode ? "application/json" : "text/plain"
+                }
+            };
+            
+            const generativeModel = client.getGenerativeModel(config);
+            const result = await generativeModel.generateContent(prompt);
+            const response = await result.response;
+            return response.text();
+
+        } catch (error) {
+            retries++;
+            const isRateLimit = error.message.includes('429') || error.status === 429 || error.message.includes('Resource has been exhausted');
+            const isNetworkError = error.message.includes('fetch failed') || error.message.includes('503') || error.message.includes('500');
+            const isModelNotFoundError = error.message.includes('404') || error.message.includes('not found');
+
+            if (isRateLimit || isNetworkError || isModelNotFoundError) {
+                const errorType = isRateLimit ? 'Rate Limit' : (isModelNotFoundError ? 'Model Not Found' : 'Network Error');
+                rateLimitLogger.warn(`Key #${currentKeyIndex} hit ${errorType} on model ${currentModel}. Swapping key...`);
+                
+                if (currentKeyIndex !== -1 && isRateLimit) markKeyAsBusy(currentKeyIndex);
+                
+                // Fallback logic: If we fail repeatedly OR if the model is just not found (404), switch to fallback
+                if ((retries > (apiKeys.length * 1.5) || isModelNotFoundError) && currentModel !== fallbackModel) {
+                     rateLimitLogger.warn(`Primary model ${currentModel} failed (${errorType}). Switching to FALLBACK: ${fallbackModel}`);
+                     currentModel = fallbackModel;
+                }
+                
+                // Small backoff for network errors
+                if (isNetworkError) await new Promise(resolve => setTimeout(resolve, 1000));
+
+            } else {
+                rateLimitLogger.error(`Gemini Error (Attempt ${retries}): ${error.message}`);
+                if (retries >= 3) throw error; 
+                await new Promise(resolve => setTimeout(resolve, 1000 * retries));
+            }
+        }
+    }
+    throw new Error(`Gemini call failed after ${maxRetries} retries.`);
 }
 
 async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', temperature = 0.5) {
-    const genAI = await getNextAvailableApiClient();
-    const generativeModel = genAI.getGenerativeModel({
-        model: model,
-        tools: tools,
-    });
+    const fallbackModel = 'gemini-2.0-flash-lite-preview-02-05';
+    let currentModel = model;
+    let retries = 0;
+    const maxRetries = 10;
 
-    const chat = generativeModel.startChat({
-        history: chatHistory,
-        generationConfig: {
-            temperature: temperature
+    while (retries < maxRetries) {
+        let currentKeyIndex = -1;
+        try {
+            const { client, index } = await getNextAvailableApiClient();
+            currentKeyIndex = index;
+
+            const generativeModel = client.getGenerativeModel({
+                model: currentModel,
+                tools: tools,
+                generationConfig: { temperature: temperature }
+            });
+
+            const chat = generativeModel.startChat({
+                history: chatHistory
+            });
+
+            const lastMessageParts = chatHistory[chatHistory.length - 1].parts;
+            const result = await chat.sendMessage(lastMessageParts);
+            const response = await result.response;
+            
+            return response.functionCalls() ? response.functionCalls() : response.text();
+
+        } catch (error) {
+            retries++;
+            const isRateLimit = error.message.includes('429') || error.status === 429 || error.message.includes('Resource has been exhausted');
+            const isNetworkError = error.message.includes('fetch failed') || error.message.includes('503') || error.message.includes('500');
+            const isModelNotFoundError = error.message.includes('404') || error.message.includes('not found');
+            
+            if (isRateLimit || isNetworkError || isModelNotFoundError) {
+                const errorType = isRateLimit ? 'Rate Limit' : (isModelNotFoundError ? 'Model Not Found' : 'Network Error');
+                rateLimitLogger.warn(`Key #${currentKeyIndex} hit ${errorType} in CHAT on model ${currentModel}. Swapping key...`);
+                
+                if (currentKeyIndex !== -1 && isRateLimit) markKeyAsBusy(currentKeyIndex);
+
+                 if ((retries > (apiKeys.length * 1.5) || isModelNotFoundError) && currentModel !== fallbackModel) {
+                    rateLimitLogger.warn(`Primary model ${currentModel} failed (${errorType}). Switching to FALLBACK: ${fallbackModel}`);
+                    currentModel = fallbackModel;
+               }
+               
+               if (isNetworkError) await new Promise(resolve => setTimeout(resolve, 1000));
+
+            } else {
+                rateLimitLogger.error(`Gemini Chat Error (Attempt ${retries}): ${error.message}`);
+                if (retries >= 3) throw error;
+                await new Promise(resolve => setTimeout(resolve, 1000 * retries));
+            }
         }
-    });
+    }
+    throw new Error(`Gemini CHAT failed after ${maxRetries} retries.`);
+}
 
-    const lastMessageParts = chatHistory[chatHistory.length - 1].parts;
-    const result = await chat.sendMessage(lastMessageParts);
-    const response = await result.response;
-    
-    return response.functionCalls() ? response.functionCalls() : response.text();
+function getApiKeyCount() {
+    return apiKeys.length;
 }
 
 const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);

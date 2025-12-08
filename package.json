@@ -33,8 +33,11 @@
     "node-edge-tts": "^1.2.8",
     "node-fetch": "^2.7.0",
     "node-pg-migrate": "^8.0.3",
+    "p-limit": "^3.1.0",
     "pg": "^8.16.3",
     "puppeteer": "^24.31.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "rss-parser": "^3.13.0",
     "xrss": "^1.1.0"
   },

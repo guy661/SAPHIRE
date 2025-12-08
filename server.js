@@ -52,6 +52,73 @@ async function main() {
 
     const parser = new Parser();
 
+    // --- AUTH ROUTES ---
+
+    app.post('/api/register', async (req, res) => {
+        const { username, password, language = 'de' } = req.body;
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+        try {
+            const existingUser = await db.getUserByUsername(username);
+            if (existingUser) {
+                return res.status(409).json({ error: 'Username already exists' });
+            }
+            const user = await db.createUser(username, password, language);
+            req.session.userId = user.id;
+            req.session.language = user.language;
+            serverLogger.info(`New user registered: ${username}`);
+            res.status(201).json({ id: user.id, username: user.username, language: user.language });
+        } catch (error) {
+            serverLogger.error('Registration error:', error);
+            res.status(500).json({ error: 'Registration failed' });
+        }
+    });
+
+    app.post('/api/login', async (req, res) => {
+        const { username, password } = req.body;
+        try {
+            const user = await db.getUserByUsername(username);
+            if (user && await bcrypt.compare(password, user.password)) {
+                req.session.userId = user.id;
+                req.session.language = user.language || 'de';
+                serverLogger.info(`User logged in: ${username}`);
+                res.json({ id: user.id, username: user.username, language: user.language });
+            } else {
+                res.status(401).json({ error: 'Invalid credentials' });
+            }
+        } catch (error) {
+            serverLogger.error('Login error:', error);
+            res.status(500).json({ error: 'Login failed' });
+        }
+    });
+
+    app.post('/api/logout', (req, res) => {
+        req.session.destroy(err => {
+            if (err) {
+                return res.status(500).json({ error: 'Could not log out' });
+            }
+            res.clearCookie('sid');
+            res.json({ message: 'Logged out' });
+        });
+    });
+
+    app.get('/api/user', async (req, res) => {
+        if (!req.session.userId) {
+            return res.status(401).json({ error: 'Unauthorized' });
+        }
+        try {
+            const user = await db.getUserById(req.session.userId);
+            if (!user) {
+                return res.status(404).json({ error: 'User not found' });
+            }
+            res.json({ id: user.id, username: user.username, language: user.language });
+        } catch (error) {
+            serverLogger.error('Fetch user error:', error);
+            res.status(500).json({ error: 'Failed to fetch user' });
+        }
+    });
+
     const isAuthenticated = (req, res, next) => {
         if (req.session.userId) {
             next();
@@ -233,10 +300,13 @@ async function main() {
                 return res.status(403).json({ error: "Forbidden" });
             }
 
-            // Use saved categories if none provided by frontend
-            if (rss_categories.length === 0 && dashboard.selected_categories && dashboard.selected_categories.length > 0) {
+            // Prioritize saved categories from DB to ensure personalization is respected
+            // The frontend often sends a default "all" list if not explicitly handled
+            if (dashboard.selected_categories && dashboard.selected_categories.length > 0) {
                 rss_categories = dashboard.selected_categories;
-                serverLogger.info(`Using saved categories for search: ${rss_categories.join(', ')}`);
+                serverLogger.info(`Using saved categories from DB: ${rss_categories.join(', ')}`);
+            } else if (rss_categories.length === 0) {
+                serverLogger.info(`No categories provided or saved. Defaulting to ALL.`);
             }
 
             const jobId = await startSearchJob(parseInt(id, 10), req.session.userId, rss_categories);
