@@ -33,6 +33,7 @@
     "node-edge-tts": "^1.2.8",
     "node-fetch": "^2.7.0",
     "node-pg-migrate": "^8.0.3",
+    "onnxruntime-node": "^1.23.2",
     "p-limit": "^3.1.0",
     "pg": "^8.16.3",
     "puppeteer": "^24.31.0",

@@ -110,7 +110,11 @@ const worker = new BullMQWorker('semantic-summary', async (job) => {
 });
 
 worker.on('completed', (job, result) => {
-    bullLogger.info(`Job ${job.id} in 'semantic-summary' completed. Found ${result.clusters} clusters.`);
+    if (result) {
+        bullLogger.info(`Job ${job.id} in 'semantic-summary' completed. Found ${result.clusters} clusters.`);
+    } else {
+        bullLogger.info(`Job ${job.id} in 'semantic-summary' completed with no result (likely filtered out).`);
+    }
 });
 
 worker.on('failed', (job, err) => {
