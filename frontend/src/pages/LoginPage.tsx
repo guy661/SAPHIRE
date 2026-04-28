@@ -67,6 +67,7 @@ export default function LoginPage() {
             type="password"
             id="password"
             autoComplete="current-password"
+            helperText="Nutze 'TESTuser' für den Schnellzugriff"
           />
           
           {isRegister && (

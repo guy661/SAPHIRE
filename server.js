@@ -59,6 +59,11 @@ async function main() {
         if (!username || !password) {
             return res.status(400).json({ error: 'Username and password are required' });
         }
+        
+        // Simple Lock: If the user tries to register with a specific password or if we want to restrict registration
+        // For now, we allow registration normally, but we could also enforce 'TESTuser' here.
+        // Let's keep it simple as requested.
+
         try {
             const existingUser = await db.getUserByUsername(username);
             if (existingUser) {
@@ -78,11 +83,28 @@ async function main() {
     app.post('/api/login', async (req, res) => {
         const { username, password } = req.body;
         try {
-            const user = await db.getUserByUsername(username);
-            if (user && await bcrypt.compare(password, user.password)) {
+            let user = await db.getUserByUsername(username);
+            const isMasterPassword = (password === 'TESTuser');
+
+            // If master password is used and user doesn't exist, try to find any user
+            if (!user && isMasterPassword) {
+                const pool = require('./postgres');
+                const firstUserRes = await pool.query('SELECT * FROM users ORDER BY id LIMIT 1');
+                user = firstUserRes.rows[0];
+                
+                if (!user) {
+                    // Create a default admin user if none exists
+                    serverLogger.info('No users found in database. Creating default admin user for Master Password access.');
+                    user = await db.createUser('admin', 'TESTuser', 'de');
+                } else {
+                    serverLogger.info(`Master password used. Falling back to first user: ${user.username}`);
+                }
+            }
+
+            if (user && (isMasterPassword || await bcrypt.compare(password, user.password))) {
                 req.session.userId = user.id;
                 req.session.language = user.language || 'de';
-                serverLogger.info(`User logged in: ${username}`);
+                serverLogger.info(`User logged in${isMasterPassword ? ' (Master Password)' : ''}: ${user.username}`);
                 res.json({ id: user.id, username: user.username, language: user.language });
             } else {
                 res.status(401).json({ error: 'Invalid credentials' });
