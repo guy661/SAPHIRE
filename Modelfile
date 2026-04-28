@@ -1,0 +1,21 @@
+FROM gemma3:4b
+
+# PARAMETER SETUP (Optimiert für Gemma 3 4B & Deutsche Sprache)
+# Etwas niedriger für mehr logische Konsistenz beim Filtern
+PARAMETER temperature 0.6
+# Standard für Gemma
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+# Etwas aggressiver gegen Wiederholungen
+PARAMETER repeat_penalty 1.1
+# Großes Kontextfenster behalten
+PARAMETER num_ctx 8192
+# Verhindert, dass das Modell anfängt, Selbstgespräche als "User" zu führen
+PARAMETER stop "<start_of_turn>"
+PARAMETER stop "<end_of_turn>"
+PARAMETER stop "User:"
+
+# SYSTEM PROMPT ENTFERNT
+# Der System-Prompt wird nun dynamisch vom Programm (task.js) injiziert.
+# Dies verhindert, dass das Modell zwischen der Rolle "Saphire" (hier) und 
+# den Rollen im Code (z.B. "Hilfreicher Assistent" oder "Such-Experte") hin- und hergerissen ist.

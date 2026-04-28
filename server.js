@@ -10,7 +10,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
 const { Logger, EMOJIS } = require('./utils.js');
-const { orchestrateChatTask, generateSearchQueriesTask, generateFollowUpAnswerTask, selectCategoriesTask, generateGeneralKeywordsTask } = require('./task.js');
+const { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask } = require('./task.js');
 
 const serverLogger = new Logger('Server', 'green', EMOJIS.server);
 
@@ -20,9 +20,9 @@ const IN_PROD = process.env.NODE_ENV === 'production';
 
 async function main() {
     const queuesModule = await import('./queues.mjs');
-    const { fetchAllQueue } = queuesModule.default;
+    const { microSummaryQueue } = queuesModule.default;
 
-    if (!fetchAllQueue) throw new Error('fetchAllQueue is undefined!');
+    if (!microSummaryQueue) throw new Error('microSummaryQueue is undefined!');
     serverLogger.info('Queues initialized.');
 
     const { getApiKeyCount } = require('./utils.js');
@@ -127,80 +127,8 @@ async function main() {
         }
     };
     
-    const { startSearchJob } = require('./job-starter.js');
     const { getFeedCategories } = require('./rss-aggregator.js');
-    const { EdgeTTS } = require('node-edge-tts'); // Correct import
     const fs = require('fs'); // Needs standard fs for streams
-
-    // --- AUDIO API ---
-    app.get('/api/audio-summary', isAuthenticated, async (req, res) => {
-        const { jobId } = req.query;
-        serverLogger.info(`Audio summary requested for user ${req.session.userId}. JobID: ${jobId || 'latest'}`);
-        
-        let textToSpeak = "Es konnten keine Nachrichten zum Vorlesen gefunden werden.";
-
-        try {
-            if (jobId) {
-                const job = await db.getJob(jobId);
-                if (job) {
-                    const dashboard = await db.getDashboardById(job.dashboard_id);
-                    if (dashboard && dashboard.user_id === req.session.userId) {
-                        if (job.meta_summary) {
-                            textToSpeak = `Hier ist Ihre Zusammenfassung: \n\n ${job.meta_summary}`;
-                        } else {
-                            textToSpeak = "Für diesen Auftrag wurde keine Zusammenfassung generiert.";
-                        }
-                    } else {
-                        return res.status(403).json({ error: "Forbidden" });
-                    }
-                } else {
-                    return res.status(404).json({ error: "Job not found" });
-                }
-            } else {
-                // Fallback: Find the most recent dashboard/job
-                const dashboards = await db.getDashboardsByUserId(req.session.userId);
-                if (dashboards.length > 0) {
-                    const latestDashboard = dashboards[0];
-                    const lastJob = await db.getLatestCompletedJobForDashboard(latestDashboard.id);
-
-                    if (lastJob && lastJob.meta_summary) {
-                        textToSpeak = `Ihr persönliches Briefing für das Dashboard ${latestDashboard.name}: \n\n ${lastJob.meta_summary}`;
-                    } else {
-                        textToSpeak = `Für Ihr Dashboard "${latestDashboard.name}" wurde noch kein Nachrichten-Briefing erstellt.`;
-                    }
-                }
-            }
-
-            // Clean up markdown for speech (simple approach)
-            const cleanText = textToSpeak
-                .replace(/[*_#`]/g, '') // Remove markdown chars
-                .replace(/https?:\/\/\S+/g, 'Link') // Replace URLs
-                .replace(/\n\n/g, '. ') // Replace double newlines with pauses
-                .substring(0, 4500); // Limit length for TTS safety
-
-            const tempFilePath = path.join(__dirname, `tts-${randomUUID()}.mp3`);
-            const tts = new EdgeTTS({ voice: 'de-DE-KatjaNeural' });
-            
-            await tts.ttsPromise(cleanText, tempFilePath);
-            
-            res.setHeader('Content-Type', 'audio/mpeg');
-            
-            const stream = fs.createReadStream(tempFilePath);
-            stream.pipe(res);
-
-            stream.on('close', () => {
-                fs.unlink(tempFilePath, (err) => {
-                    if (err) serverLogger.warn(`Failed to delete temp TTS file: ${tempFilePath}`);
-                });
-            });
-
-        } catch (error) {
-            serverLogger.error('TTS Generation Error:', error);
-            if (!res.headersSent) {
-                res.status(500).json({ error: 'Failed to generate audio summary.' });
-            }
-        }
-    });
 
 
     // --- DASHBOARD CRUD API ---
@@ -259,13 +187,13 @@ async function main() {
 
     app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        const { name, interval_minutes, summary_style, is_active } = req.body;
+        const { name, summary_style, is_active } = req.body;
         try {
             const dashboard = await db.getDashboardById(id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
                 return res.status(403).json({ error: "Forbidden" });
             }
-            const updatedDashboard = await db.updateDashboardSettings(id, { name, interval_minutes, summary_style, is_active });
+            const updatedDashboard = await db.updateDashboardSettings(id, { name, summary_style, is_active });
             res.json(updatedDashboard);
         } catch (error) {
             serverLogger.error(`Error updating dashboard ${id}:`, error);
@@ -288,39 +216,73 @@ async function main() {
         }
     });
 
-    // --- CORE API ROUTES (Refactored) ---
+    // --- LIVE FEED API ROUTES ---
 
-    app.post("/api/dashboards/:id/run-search", isAuthenticated, async (req, res) => {
+    app.get('/api/dashboards/:id/articles', isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        let { rss_categories = [] } = req.body; 
-
         try {
-            const dashboard = await db.getDashboardById(parseInt(id, 10));
+            const dashboard = await db.getDashboardById(id);
+            if (!dashboard || dashboard.user_id !== req.session.userId) {
+                return res.status(403).json({ error: "Forbidden" });
+            }
+            const articles = await db.getDashboardArticles(id, 100);
+            res.json(articles);
+        } catch (error) {
+            serverLogger.error(`Error fetching articles for dashboard ${id}:`, error);
+            res.status(500).json({ error: 'Failed to fetch articles' });
+        }
+    });
+
+    // Simple SSE endpoint for live updates
+    app.get('/api/dashboards/:id/stream', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        try {
+            const dashboard = await db.getDashboardById(id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
                 return res.status(403).json({ error: "Forbidden" });
             }
 
-            // Prioritize saved categories from DB to ensure personalization is respected
-            // The frontend often sends a default "all" list if not explicitly handled
-            if (dashboard.selected_categories && dashboard.selected_categories.length > 0) {
-                rss_categories = dashboard.selected_categories;
-                serverLogger.info(`Using saved categories from DB: ${rss_categories.join(', ')}`);
-            } else if (rss_categories.length === 0) {
-                serverLogger.info(`No categories provided or saved. Defaulting to ALL.`);
-            }
+            res.setHeader('Content-Type', 'text/event-stream');
+            res.setHeader('Cache-Control', 'no-cache');
+            res.setHeader('Connection', 'keep-alive');
+            res.flushHeaders(); // flush the headers to establish SSE with client
 
-            const jobId = await startSearchJob(parseInt(id, 10), req.session.userId, rss_categories);
-            if (!jobId) {
-                return res.status(200).json({ jobId: null, message: "No articles found for this dashboard's topic." });
-            }
-            res.status(202).json({ jobId });
+            // Send an initial heartbeat
+            res.write(': heartbeat\n\n');
 
-        } catch (err) {
-            serverLogger.error('Error in /api/dashboards/:id/run-search:', err);
-            res.status(500).json({ error: err.message || "Error during article search" });
+            // Set up a simple polling mechanism for this connection
+            // In a production app, we would use Redis Pub/Sub or similar event emitters
+            // But this works for the family test
+            let lastCheckDate = new Date();
+            
+            const intervalId = setInterval(async () => {
+                try {
+                    const articles = await db.getDashboardArticles(id, 10);
+                    // Filter articles that were added since last check
+                    const newArticles = articles.filter(a => new Date(a.created_at) > lastCheckDate);
+                    
+                    if (newArticles.length > 0) {
+                        res.write(`data: ${JSON.stringify(newArticles)}\n\n`);
+                        lastCheckDate = new Date(); // Update last check time
+                    } else {
+                        res.write(': heartbeat\n\n');
+                    }
+                } catch (err) {
+                    serverLogger.error(`SSE polling error for dashboard ${id}:`, err);
+                }
+            }, 10000); // Check every 10 seconds
+
+            req.on('close', () => {
+                clearInterval(intervalId);
+            });
+
+        } catch (error) {
+            serverLogger.error(`Error in SSE stream for dashboard ${id}:`, error);
+            res.status(500).json({ error: 'Failed to start stream' });
         }
     });
-    
+
+
     app.post('/api/dashboards/:id/personalization-chat', isAuthenticated, async (req, res) => {
         const { id: dashboardId } = req.params;
         const userMessage = req.body.message;
@@ -357,10 +319,14 @@ async function main() {
             } else if (result.action === 'save') {
                 await db.updateDashboardTopic(dashboardId, result.data.user_intent);
                 
-                // --- NEW: AI Category Selection ---
+                // --- NEW: AI Category Selection & Keyword Generation (Parallelized) ---
+                let finalCategories = [];
+                let finalKeywords = [];
                 try {
                     const allCategories = await getFeedCategories();
-                    const selectedCategoryKeys = await selectCategoriesTask({
+                    
+                    // 1. Start AI Tasks concurrently (Get the "Vouchers"/Promises)
+                    const categoriesTaskPromise = selectCategoriesTask({
                         data: {
                             user_intent: result.data.user_intent,
                             categories: allCategories,
@@ -368,37 +334,50 @@ async function main() {
                         }
                     });
 
-                    if (selectedCategoryKeys && selectedCategoryKeys.length > 0) {
-                        await db.updateDashboardCategories(dashboardId, selectedCategoryKeys);
-                        serverLogger.info(`AI selected categories for dashboard ${dashboardId}: ${selectedCategoryKeys.join(', ')}`);
-                    } else {
-                        serverLogger.warn(`AI selected NO categories for dashboard ${dashboardId}. Defaulting to none (or all/logic dependent).`);
-                    }
-
-                    // --- NEW: AI Keyword Generation for Pre-filtering ---
-                    const keywords = await generateGeneralKeywordsTask({
+                    const keywordsTaskPromise = generateGeneralKeywordsTask({
                         data: {
                             user_intent: result.data.user_intent,
                             language: req.session.language || 'de'
                         }
                     });
-                    
-                    if (keywords && keywords.length > 0) {
-                        await db.updateDashboardSearchTerms(dashboardId, keywords);
-                        serverLogger.info(`AI generated search terms for dashboard ${dashboardId}: ${keywords.join(', ')}`);
+
+                    // 2. Wait for BOTH to finish
+                    const [selectedCategoryKeys, keywords] = await Promise.all([categoriesTaskPromise, keywordsTaskPromise]);
+
+                    // 3. Process Results
+                    if (selectedCategoryKeys && selectedCategoryKeys.length > 0) {
+                        finalCategories = selectedCategoryKeys;
+                        await db.updateDashboardCategories(dashboardId, selectedCategoryKeys);
+                        serverLogger.info(`AI selected categories for dashboard ${dashboardId}: ${selectedCategoryKeys.join(', ')}`);
+                    } else {
+                        serverLogger.warn(`AI selected NO categories for dashboard ${dashboardId}. Defaulting to none.`);
+                    }
+
+                    if (keywords && (keywords.de?.length > 0 || keywords.en?.length > 0 || Array.isArray(keywords) && keywords.length > 0)) {
+                        // Normalize keyword structure since it changed slightly
+                        finalKeywords = Array.isArray(keywords) ? keywords : [...(keywords.de || []), ...(keywords.en || [])];
+                        await db.updateDashboardSearchTerms(dashboardId, finalKeywords);
+                        serverLogger.info(`AI generated search terms for dashboard ${dashboardId}: ${finalKeywords.join(', ')}`);
                     } else {
                         serverLogger.warn(`AI generated NO search terms for dashboard ${dashboardId}.`);
                     }
-                    // ----------------------------------------------------
 
                 } catch (catError) {
                     serverLogger.error('Error during AI category/keyword selection:', catError);
-                    // Non-critical: proceed without crashing, user just gets default behavior
+                    // Non-critical: proceed without crashing
                 }
                 // ----------------------------------
 
                 req.session.chatHistory.push({ role: 'model', parts: [{ text: result.message }] });
-                res.json({ message: result.message, isDone: true });
+                
+                // Add the selected data to the message so the user can see what the AI decided
+                let summaryMessage = result.message;
+                summaryMessage += "\n\n**Hintergrund-Info:** Ich habe mein Suchsystem für dieses Dashboard nun wie folgt konfiguriert:\n";
+                summaryMessage += finalCategories.length > 0 ? `- **RSS Kategorien:** ${finalCategories.join(', ')}\n` : `- **RSS Kategorien:** (Keine passenden gefunden)\n`;
+                summaryMessage += finalKeywords.length > 0 ? `- **Google News Suchbegriffe:** ${finalKeywords.join(', ')}\n` : `- **Google News Suchbegriffe:** (Keine zusätzlichen Begriffe)\n`;
+                summaryMessage += "\nDer Live-Feed ist nun aktiv und sucht nach neuen passenden Artikeln!";
+
+                res.json({ message: summaryMessage, isDone: true, ai_categories: finalCategories, ai_keywords: finalKeywords });
                 delete req.session.chatHistory; 
             } else { 
                 res.status(500).json({ message: result.message });
@@ -406,81 +385,6 @@ async function main() {
         } catch (error) {
             serverLogger.error('Error in personalization chat:', error);
             res.status(500).json({ message: 'Oh, da ist ein technischer Fehler aufgetreten.' });
-        }
-    });
-
-    app.get("/api/job/:id", isAuthenticated, async (req, res) => {
-        const { id } = req.params;
-        try {
-            const job = await db.getJob(id);
-            if (!job) return res.status(404).json({ status: 'not_found' });
-            
-            // Authorization Check
-            const dashboard = await db.getDashboardById(job.dashboard_id);
-            if (!dashboard || dashboard.user_id !== req.session.userId) {
-                return res.status(403).json({ error: "Forbidden" });
-            }
-
-            // The new synthesis worker handles all processing, so we just return the job from the DB.
-            res.json({ status: job.status, summary: job.meta_summary });
-
-        } catch (err) {
-            serverLogger.error(`Error fetching results for job ${id}:`, err);
-            res.status(500).json({ error: "Error fetching job results" });
-        }
-    });
-
-    app.get("/api/jobs/:jobId/clusters", isAuthenticated, async (req, res) => {
-        const { jobId } = req.params;
-        const { userId } = req.session; // Get userId from session
-        try {
-            // Authorization Check: Ensure the job belongs to the logged-in user.
-            const job = await db.getJob(jobId);
-            if (!job) return res.status(404).json({ error: "Job not found" });
-
-            const dashboard = await db.getDashboardById(job.dashboard_id);
-            if (!dashboard || dashboard.user_id !== userId) {
-                return res.status(403).json({ error: "Forbidden" });
-            }
-
-            // Fetch the clustered articles for the job, now with user feedback
-            const clusters = await db.getClustersByJobId(jobId, userId);
-            res.json(clusters);
-
-        } catch (err) {
-            serverLogger.error(`Error fetching clusters for job ${jobId}:`, err);
-            res.status(500).json({ error: "Error fetching cluster results" });
-        }
-    });
-
-    app.post("/api/jobs/:jobId/chat", isAuthenticated, async (req, res) => {
-        const { jobId } = req.params;
-        const { message, chatHistory, summary } = req.body;
-
-        try {
-            // Authorization: Check if the job belongs to the user
-            const job = await db.getJob(jobId);
-            if (!job) return res.status(404).json({ error: "Job not found" });
-
-            const dashboard = await db.getDashboardById(job.dashboard_id);
-            if (!dashboard || dashboard.user_id !== req.session.userId) {
-                return res.status(403).json({ error: "Forbidden" });
-            }
-
-            const answer = await generateFollowUpAnswerTask({
-                data: {
-                    question: message,
-                    chatHistory: chatHistory || [],
-                    summary: summary,
-                    language: req.session.language || 'de'
-                }
-            });
-
-            res.json({ answer });
-
-        } catch (error) {
-            serverLogger.error(`Error in chat for job ${jobId}:`, error);
-            res.status(500).json({ error: 'Failed to get answer from AI' });
         }
     });
 
@@ -496,30 +400,6 @@ async function main() {
         } catch (error) {
             serverLogger.error('Error fetching RSS categories:', error);
             res.status(500).json({ error: 'Failed to fetch RSS categories' });
-        }
-    });
-
-    app.post('/api/feedback', isAuthenticated, async (req, res) => {
-        const { clusterId, feedbackType } = req.body;
-        const userId = req.session.userId;
-
-        if (!clusterId) {
-            return res.status(400).json({ error: 'clusterId is required.' });
-        }
-
-        try {
-            if (feedbackType === 'like' || feedbackType === 'dislike') {
-                // Upsert logic
-                const feedback = await db.addUserFeedback(userId, clusterId, feedbackType);
-                res.status(201).json(feedback);
-            } else {
-                // Deletion logic for null or other values
-                await db.deleteUserFeedback(userId, clusterId);
-                res.status(204).send(); // 204 No Content is appropriate for successful deletion
-            }
-        } catch (error) {
-            serverLogger.error(`Error processing feedback for user ${userId} on cluster ${clusterId}:`, error);
-            res.status(500).json({ error: 'Failed to process feedback.' });
         }
     });
 

@@ -1,402 +1,239 @@
-import { useParams, Link as RouterLink } from 'react-router-dom';
-import { Typography, Box, Button, CircularProgress, Alert, List, ListItemButton, ListItemText, Divider, Paper, FormGroup, FormControlLabel, Checkbox, TextField, IconButton } from '@mui/material';
-import { useEffect, useState, useCallback, useRef } from 'react';
-import { getDashboardById, getDashboardJobs, runDashboardSearch, getAvailableRssCategories, postJobChat } from '../services/api';
-import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels';
-import { styled } from '@mui/material/styles';
+import React, { useState, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { getDashboardById, getDashboardArticles } from '../services/api';
+import { 
+    Box, Typography, CircularProgress, Alert, Paper, Link, Chip, IconButton, Button
+} from '@mui/material';
+import { ArrowLeft, Gear } from '@phosphor-icons/react';
+import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import SendIcon from '@mui/icons-material/Send';
-import SettingsIcon from '@mui/icons-material/Settings';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
-import PauseIcon from '@mui/icons-material/Pause';
-
-const StyledResizeHandle = styled(PanelResizeHandle)(({ theme }) => ({
-    width: '8px',
-    background: 'transparent',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    transition: 'background 0.2s',
-    '&:hover': {
-        background: theme.palette.action.hover,
-    },
-    '&::after': {
-        content: '""',
-        display: 'block',
-        width: '1px',
-        height: '40px',
-        background: theme.palette.divider,
-    }
-}));
 
 const markdownComponents = {
-    h1: ({...props}) => <Typography variant="h4" component="h1" gutterBottom {...props} />,
-    h2: ({...props}) => <Typography variant="h5" component="h2" gutterBottom {...props} />,
-    h3: ({...props}) => <Typography variant="h6" component="h3" gutterBottom {...props} />,
-    p: ({...props}) => <Typography variant="body1" paragraph sx={{ lineHeight: 1.7, fontSize: '1.1rem' }} {...props} />,
-    a: ({...props}) => <Link {...props} />,
-    li: ({...props}) => <li style={{marginBottom: '8px'}}><Typography component="span" {...props} /></li>
+    h1: ({...props}) => <Typography variant="h6" component="h1" gutterBottom {...props} />,
+    h2: ({...props}) => <Typography variant="subtitle1" component="h2" gutterBottom {...props} />,
+    h3: ({...props}) => <Typography variant="subtitle2" component="h3" gutterBottom {...props} />,
+    p: ({...props}) => <Typography variant="body2" paragraph sx={{ lineHeight: 1.5, mb: 1 }} {...props} />,
+    a: ({...props}) => <Link {...props} target="_blank" rel="noopener noreferrer" />,
+    li: ({...props}) => <li style={{marginBottom: '4px'}}><Typography variant="body2" component="span" {...props} /></li>
 };
-
-interface ChatMessage {
-    role: 'user' | 'model';
-    parts: { text: string }[];
-}
 
 export default function DashboardDetailPage() {
     const { id } = useParams<{ id: string }>();
-    const [dashboard, setDashboard] = useState<any>(null);
-    const [jobs, setJobs] = useState<any[]>([]);
-    const [selectedJob, setSelectedJob] = useState<any>(null);
+    const navigate = useNavigate();
     
+    const [dashboard, setDashboard] = useState<any>(null);
+    const [articles, setArticles] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
-    const [isPolling, setIsPolling] = useState(false);
-    const [runningJobId, setRunningJobId] = useState<string | null>(null);
-    
-    const [availableCategories, setAvailableCategories] = useState<{key: string, name: string}[]>([]);
-    const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-
-    // Chat State
-    const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
-    const [chatInput, setChatInput] = useState('');
-    const [isChatLoading, setIsChatLoading] = useState(false);
-    const chatEndRef = useRef<HTMLDivElement>(null);
-
-    // Audio State
-    const [isPlaying, setIsPlaying] = useState(false);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
-
-    const scrollToBottom = () => {
-        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    };
+    const [isStreaming, setIsStreaming] = useState(false);
 
     useEffect(() => {
-        scrollToBottom();
-    }, [chatHistory]);
+        if (!id) return;
+        
+        let eventSource: EventSource | null = null;
 
-    // Cleanup audio on unmount
-    useEffect(() => {
-        return () => {
-            if (audioRef.current) {
-                audioRef.current.pause();
-                audioRef.current = null;
+        const loadInitialData = async () => {
+            try {
+                setLoading(true);
+                const dashData = await getDashboardById(id);
+                setDashboard(dashData);
+
+                const articlesData = await getDashboardArticles(id);
+                setArticles(articlesData);
+                setError(null);
+            } catch (err: any) {
+                console.error("Failed to load dashboard data:", err);
+                setError(err.message || 'Laden fehlgeschlagen');
+            } finally {
+                setLoading(false);
             }
         };
-    }, []);
 
-    const handleSelectJob = useCallback(async (jobId: string) => {
-        const job = jobs.find(j => j.id === jobId);
-        if (job) {
-            setSelectedJob(job);
-            setChatHistory([]); // Clear chat history when switching jobs
-            
-            // Stop audio if switching jobs
-            if (audioRef.current) {
-                audioRef.current.pause();
-                audioRef.current = null;
-                setIsPlaying(false);
-            }
-        }
-    }, [jobs]);
+        const setupSSE = () => {
+            eventSource = new EventSource(`http://localhost:3001/api/dashboards/${id}/stream`, {
+                withCredentials: true
+            });
 
-    const handlePlayAudio = () => {
-        if (!selectedJob) return;
+            eventSource.onopen = () => {
+                console.log("SSE Connection opened.");
+                setIsStreaming(true);
+            };
 
-        if (isPlaying && audioRef.current) {
-            audioRef.current.pause();
-            setIsPlaying(false);
-        } else {
-            if (!audioRef.current) {
-                // API call to the specific job's audio summary
-                const audio = new Audio(`http://localhost:3001/api/audio-summary?jobId=${selectedJob.id}`);
-                // Important: Ensure credentials (cookies) are sent if the API requires auth
-                // The `new Audio(url)` constructor handles simple GET requests. 
-                // Since your API requires session cookies and cross-origin might be an issue depending on setup,
-                // standard Audio element might fail if strict CORS/Auth is needed and not handled by browser implicitly for media.
-                // However, for `localhost`, typically cookies are shared if path matches.
-                // A more robust way for authenticated audio is fetching blob -> blobURL.
+            eventSource.onmessage = (event) => {
+                if (event.data === 'heartbeat') return;
                 
-                // Given the current setup (proxy or CORS credentials), let's try simple URL first.
-                // If it fails due to Auth, we switch to fetch-blob pattern.
-                
-                audioRef.current = audio;
-                audio.addEventListener('ended', () => {
-                    setIsPlaying(false);
-                    audioRef.current = null;
-                });
-                audio.addEventListener('error', (e) => {
-                    console.error("Error playing audio.", e);
-                    setIsPlaying(false);
-                    setError("Fehler beim Abspielen der Audio-Zusammenfassung (evtl. nicht angemeldet?)");
-                });
-            }
-            audioRef.current.play().catch(e => console.error("Audio playback failed:", e));
-            setIsPlaying(true);
-        }
-    };
-    
-    const fetchJobs = useCallback(() => {
-        if (!id) return;
-        getDashboardJobs(id)
-            .then(data => {
-                setJobs(data);
-                const stillRunningJob = data.find(job => job.id === runningJobId);
-                if (stillRunningJob && (stillRunningJob.status === 'completed' || stillRunningJob.status === 'failed')) {
-                    handleSelectJob(stillRunningJob.id);
-                    setRunningJobId(null);
-                    setIsPolling(false);
+                try {
+                    const newArticles = JSON.parse(event.data);
+                    if (newArticles.length > 0) {
+                        setArticles(prev => {
+                            // Merge new articles, avoiding duplicates
+                            const existingIds = new Set(prev.map(a => a.id));
+                            const uniqueNew = newArticles.filter((a: any) => !existingIds.has(a.id));
+                            return [...uniqueNew, ...prev];
+                        });
+                    }
+                } catch (e) {
+                    console.error("Error parsing SSE data:", e);
                 }
-            })
-            .catch(err => console.error("Could not fetch dashboard jobs.", err));
-    }, [id, runningJobId, handleSelectJob]);
+            };
 
-    useEffect(() => {
-        if (!id) return;
-        setLoading(true);
-        Promise.all([
-            getDashboardById(id),
-            getDashboardJobs(id),
-            getAvailableRssCategories()
-        ]).then(([dashboardData, jobsData, categoriesData]) => {
-            setDashboard(dashboardData);
-            setJobs(jobsData);
-            setAvailableCategories(categoriesData);
-            
-            // Use saved categories if available, otherwise select all
-            if (dashboardData.selected_categories && Array.isArray(dashboardData.selected_categories) && dashboardData.selected_categories.length > 0) {
-                 setSelectedCategories(dashboardData.selected_categories);
-            } else {
-                 setSelectedCategories(categoriesData.map((cat: any) => cat.key));
-            }
+            eventSource.onerror = (err) => {
+                console.error("SSE Error:", err);
+                setIsStreaming(false);
+                eventSource?.close();
+                // Simple reconnect logic after 5 seconds
+                setTimeout(setupSSE, 5000);
+            };
+        };
 
-            // Select the latest completed job immediately without triggering re-renders via dependencies
-            if (jobsData.length > 0) {
-                const latestCompleted = jobsData.find((j: any) => j.status === 'completed');
-                if (latestCompleted) {
-                    setSelectedJob(latestCompleted);
-                    // Chat history is cleared by default logic
-                }
+        loadInitialData().then(() => {
+            setupSSE();
+        });
+
+        return () => {
+            if (eventSource) {
+                eventSource.close();
             }
-        }).catch(err => {
-            setError('Fehler beim Laden des Dashboards.');
-            console.error(err);
-        }).finally(() => setLoading(false));
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        };
     }, [id]);
 
-    useEffect(() => {
-        if (!runningJobId) return;
-        const interval = setInterval(() => {
-             fetchJobs(); 
-        }, 5000);
-        return () => clearInterval(interval);
-    }, [runningJobId, fetchJobs]);
-
-    const handleCategoryChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-        const { name, checked } = event.target;
-        setSelectedCategories(prev => 
-            checked ? [...prev, name] : prev.filter(key => key !== name)
+    if (loading) {
+        return (
+            <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
+                <CircularProgress />
+            </Box>
         );
-    };
+    }
 
-    const handleRunSearch = useCallback(async () => {
-        if (!id || selectedCategories.length === 0) {
-            setError("Bitte wählen Sie mindestens eine Feed-Kategorie aus.");
-            return;
-        };
-
-        console.log(`[DEBUG] handleRunSearch triggered. Sending categories:`, selectedCategories);
-
-        setError(null);
-        setChatHistory([]);
-        const optimisticJobId = `temp-${Math.random()}`;
-        const optimisticJob = { id: optimisticJobId, status: 'processing', created_at: new Date().toISOString(), meta_summary: null };
-        setJobs(prev => [optimisticJob, ...prev]);
-        setSelectedJob(optimisticJob);
-        setIsPolling(true);
-
-        try {
-            const runningJob = await runDashboardSearch(id, selectedCategories);
-            if(runningJob.jobId) {
-                setJobs(prev => prev.map(j => j.id === optimisticJobId ? { ...j, id: runningJob.jobId, status: 'processing' } : j));
-                setRunningJobId(runningJob.jobId);
-            } else {
-                setIsPolling(false);
-                setError(runningJob.message || "Keine neuen Artikel für eine Zusammenfassung gefunden.");
-                setJobs(prev => prev.filter(j => j.id !== optimisticJobId));
-            }
-        } catch (err) {
-            setError('Fehler beim Starten des Jobs.');
-            console.error(err);
-            setIsPolling(false);
-            setJobs(prev => prev.filter(j => j.id !== optimisticJobId));
-        }
-    }, [id, selectedCategories]);
-
-    const handleChatSubmit = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!chatInput.trim() || !selectedJob) return;
-
-        const userMessage = chatInput;
-        setChatInput('');
-        setChatHistory(prev => [...prev, { role: 'user', parts: [{ text: userMessage }] }]);
-        setIsChatLoading(true);
-
-        try {
-            const result = await postJobChat(selectedJob.id, userMessage, chatHistory, selectedJob.meta_summary);
-            setChatHistory(prev => [...prev, { role: 'model', parts: [{ text: result.answer }] }]);
-        } catch (err) {
-            console.error("Chat error:", err);
-            setChatHistory(prev => [...prev, { role: 'model', parts: [{ text: 'Entschuldigung, ich konnte darauf nicht antworten. Bitte versuchen Sie es später noch einmal.' }] }]);
-        } finally {
-            setIsChatLoading(false);
-        }
-    };
-    
-    if (loading) return <Box sx={{display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4}}><CircularProgress /></Box>;
-    if (error) return <Alert severity="error" sx={{ m: 4 }}>{error}</Alert>;
-    if (!dashboard) return <Alert severity="warning" sx={{ m: 4 }}>Dashboard nicht gefunden.</Alert>;
+    if (error || !dashboard) {
+        return (
+            <Box p={3}>
+                <Alert severity="error">{error || 'Dashboard nicht gefunden.'}</Alert>
+                <Button sx={{ mt: 2 }} onClick={() => navigate('/')} startIcon={<ArrowLeft />}>
+                    Zurück zur Übersicht
+                </Button>
+            </Box>
+        );
+    }
 
     return (
-        <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', p: 2, flexShrink: 0, borderBottom: '1px solid', borderColor: 'divider' }}>
-                <Typography variant="h5">{dashboard.name}</Typography>
-                <Box>
-                    {selectedJob && selectedJob.status === 'completed' && (
-                        <IconButton onClick={handlePlayAudio} title="Zusammenfassung vorlesen" sx={{ mr: 1 }}>
-                            {isPlaying ? <PauseIcon color="primary" /> : <PlayArrowIcon />}
-                        </IconButton>
-                    )}
-                    <IconButton component={RouterLink} to={`/dashboard/${id}/settings`} title="Einstellungen" sx={{ mr: 1 }}>
-                        <SettingsIcon />
+        <Box sx={{ maxWidth: '800px', mx: 'auto', p: { xs: 2, md: 4 } }}>
+            {/* Header */}
+            <Box display="flex" justifyContent="space-between" alignItems="center" mb={4}>
+                <Box display="flex" alignItems="center" gap={2}>
+                    <IconButton onClick={() => navigate('/')} size="small" sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
+                        <ArrowLeft />
                     </IconButton>
-                    <Button variant="outlined" component={RouterLink} to={`/dashboard/${id}/edit`}>Thema bearbeiten</Button>
+                    <Box>
+                        <Typography variant="h4" fontWeight={700}>
+                            {dashboard.name}
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            Live-Feed
+                            {isStreaming && (
+                                <Box component="span" sx={{
+                                    width: 8, height: 8, borderRadius: '50%', bgcolor: 'success.main',
+                                    animation: 'pulse 1.5s infinite',
+                                    '@keyframes pulse': {
+                                        '0%': { transform: 'scale(0.95)', boxShadow: '0 0 0 0 rgba(46, 125, 50, 0.7)' },
+                                        '70%': { transform: 'scale(1)', boxShadow: '0 0 0 6px rgba(46, 125, 50, 0)' },
+                                        '100%': { transform: 'scale(0.95)', boxShadow: '0 0 0 0 rgba(46, 125, 50, 0)' }
+                                    }
+                                }} />
+                            )}
+                        </Typography>
+                    </Box>
                 </Box>
+                
+                <IconButton onClick={() => navigate(`/dashboard/${id}/settings`)} sx={{ bgcolor: 'background.paper', boxShadow: 1 }}>
+                    <Gear />
+                </IconButton>
             </Box>
 
-            <PanelGroup direction="horizontal" style={{ flexGrow: 1, height: 0 }}>
-                <Panel defaultSize={25} minSize={20} maxSize={40}>
-                    <Box sx={{ p: 1, height: '100%', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
-                        
-                        <Typography variant="subtitle2" sx={{ px: 2, py: 1, color: 'text.secondary' }}>Quellen auswählen</Typography>
-                        <Paper variant="outlined" sx={{ p: 1, m:1, maxHeight: '200px', overflowY: 'auto' }}>
-                            <FormGroup>
-                                {availableCategories.map(cat => (
-                                    <FormControlLabel 
-                                        key={cat.key}
-                                        control={
-                                            <Checkbox 
-                                                checked={selectedCategories.includes(cat.key)} 
-                                                onChange={handleCategoryChange}
-                                                name={cat.key}
-                                                size="small"
-                                            />
+            {/* Content Feed */}
+            {articles.length === 0 ? (
+                <Paper sx={{ p: 4, textAlign: 'center', bgcolor: 'background.paper' }}>
+                    <Typography variant="h6" color="text.secondary" mb={2}>
+                        Noch keine Artikel gefunden.
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                        Der Live-Feed ist aktiv. Sobald neue Nachrichten zu deinem Thema gefunden werden, tauchen sie hier automatisch auf.
+                    </Typography>
+                </Paper>
+            ) : (
+                <Box display="flex" flexDirection="column" gap={3}>
+                    <AnimatePresence>
+                        {articles.map((article, index) => (
+                            <motion.div
+                                key={article.id}
+                                initial={{ opacity: 0, y: -20, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                transition={{ duration: 0.4, delay: index < 5 ? index * 0.1 : 0 }}
+                            >
+                                <Paper 
+                                    elevation={0}
+                                    sx={{ 
+                                        p: 3, 
+                                        borderRadius: 3,
+                                        border: '1px solid',
+                                        borderColor: 'divider',
+                                        bgcolor: 'background.paper',
+                                        transition: 'transform 0.2s ease, box-shadow 0.2s ease',
+                                        '&:hover': {
+                                            transform: 'translateY(-4px)',
+                                            boxShadow: 4,
                                         }
-                                        label={<Typography variant="body2">{cat.name}</Typography>}
-                                    />
-                                ))}
-                            </FormGroup>
-                        </Paper>
-                        
-                        <Button variant="contained" onClick={handleRunSearch} disabled={isPolling || availableCategories.length === 0 || selectedCategories.length === 0} sx={{ m: 1 }}>
-                            {isPolling ? `Analyse läuft...` : 'Neue Zusammenfassung'}
-                        </Button>
-                        <Divider sx={{ my: 1 }} />
-                         <Typography variant="subtitle2" sx={{ px: 2, py: 1, color: 'text.secondary' }}>Vergangene Analysen</Typography>
-                        <List dense>
-                            {jobs.map(job => (
-                                <ListItemButton key={job.id} selected={selectedJob?.id === job.id} onClick={() => handleSelectJob(job.id)}>
-                                    <ListItemText 
-                                        primary={`Analyse vom ${new Date(job.created_at).toLocaleString('de-DE')}`}
-                                        secondary={job.status} 
-                                    />
-                                </ListItemButton>
-                            ))}
-                        </List>
-                    </Box>
-                </Panel>
-                <StyledResizeHandle />
-                <Panel defaultSize={75} minSize={60}>
-                    <Box sx={{ p: 0, height: '100%', overflowY: 'hidden', display: 'flex', flexDirection: 'column' }}>
-                        <Box sx={{ flexGrow: 1, overflowY: 'auto', p: { xs: 2, md: 4 } }}>
-                            {selectedJob ? (
-                                <>
-                                    {selectedJob.meta_summary && (
-                                        <Box mb={4}>
-                                            <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
-                                                {selectedJob.meta_summary}
+                                    }}
+                                >
+                                    <Box display="flex" justifyContent="space-between" alignItems="flex-start" mb={1}>
+                                        <Typography variant="caption" color="primary.main" fontWeight={600} sx={{ textTransform: 'uppercase', letterSpacing: 1 }}>
+                                            {article.source_name}
+                                        </Typography>
+                                        <Typography variant="caption" color="text.secondary">
+                                            {new Date(article.pub_date || article.created_at).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr
+                                        </Typography>
+                                    </Box>
+                                    
+                                    <Link href={article.link} target="_blank" rel="noopener noreferrer" underline="hover" color="inherit">
+                                        <Typography variant="h6" component="h2" fontWeight={700} mb={1}>
+                                            {article.title}
+                                        </Typography>
+                                    </Link>
+
+                                    {article.micro_summary ? (
+                                        <Box sx={{ mt: 2, p: 2, bgcolor: 'action.hover', borderRadius: 2 }}>
+                                            <ReactMarkdown 
+                                                remarkPlugins={[remarkGfm]} 
+                                                components={markdownComponents}
+                                            >
+                                                {article.micro_summary}
                                             </ReactMarkdown>
                                         </Box>
-                                    )}
-
-                                    {/* Removed Cluster Cards */}
-                                    
-                                    {(isPolling || selectedJob?.status === 'processing') && (
-                                         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '200px', color: 'text.secondary', flexDirection: 'column' }}>
-                                            <CircularProgress />
-                                            <Typography sx={{ mt: 2 }}>Analyse wird verarbeitet...</Typography>
-                                            <Typography variant="caption" sx={{ mt: 1 }}>Job ID: {selectedJob?.id.startsWith('temp-') ? 'wird erstellt...' : selectedJob?.id}</Typography>
-                                         </Box>
-                                    )}
-                                    
-                                    {/* Chat History Display */}
-                                    {chatHistory.length > 0 && (
-                                        <Box sx={{ mt: 4, mb: 2 }}>
-                                            <Divider sx={{ mb: 2 }}>
-                                                <Typography variant="caption" color="text.secondary">RÜCKFRAGEN & ANTWORTEN</Typography>
-                                            </Divider>
-                                            {chatHistory.map((msg, index) => (
-                                                <Box key={index} sx={{ 
-                                                    display: 'flex', 
-                                                    justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start', 
-                                                    mb: 2 
-                                                }}>
-                                                    <Paper sx={{ 
-                                                        p: 2, 
-                                                        maxWidth: '80%', 
-                                                        bgcolor: msg.role === 'user' ? 'primary.light' : 'background.paper',
-                                                        color: msg.role === 'user' ? 'primary.contrastText' : 'text.primary'
-                                                    }}>
-                                                        <Typography variant="body1">{msg.parts[0].text}</Typography>
-                                                    </Paper>
-                                                </Box>
-                                            ))}
-                                            <div ref={chatEndRef} />
+                                    ) : (
+                                        <Box display="flex" alignItems="center" gap={1} mt={2}>
+                                            <CircularProgress size={16} />
+                                            <Typography variant="caption" color="text.secondary">
+                                                Generiere Zusammenfassung...
+                                            </Typography>
                                         </Box>
                                     )}
-                                </>
-                            ) : (
-                                 <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'text.secondary', flexDirection: 'column' }}>
-                                    <Typography variant="h6">Keine Zusammenfassung ausgewählt</Typography>
-                                    <Typography sx={{ mt: 1 }}>Wählen Sie eine Analyse aus der Liste aus oder erstellen Sie eine neue.</Typography>
-                                </Box>
-                            )}
-                        </Box>
-                        
-                        {/* Chat Input Area - Sticky at bottom */}
-                        {selectedJob && selectedJob.status === 'completed' && (
-                            <Box component="form" onSubmit={handleChatSubmit} sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider', bgcolor: 'background.paper' }}>
-                                <Box sx={{ display: 'flex', gap: 1 }}>
-                                    <TextField
-                                        fullWidth
-                                        placeholder="Stellen Sie eine Frage zu dieser Zusammenfassung..."
-                                        value={chatInput}
-                                        onChange={(e) => setChatInput(e.target.value)}
-                                        disabled={isChatLoading}
-                                        variant="outlined"
-                                        size="small"
-                                    />
-                                    <IconButton type="submit" color="primary" disabled={isChatLoading || !chatInput.trim()}>
-                                        {isChatLoading ? <CircularProgress size={24} /> : <SendIcon />}
-                                    </IconButton>
-                                </Box>
-                            </Box>
-                        )}
-                    </Box>
-                </Panel>
-            </PanelGroup>
+                                    
+                                    <Box display="flex" justifyContent="flex-end" mt={2}>
+                                        <Chip 
+                                            label={`Relevanz: ${Math.round((article.relevance_score || 0) * 100)}%`} 
+                                            size="small" 
+                                            color="secondary" 
+                                            variant="outlined" 
+                                            sx={{ opacity: 0.8 }}
+                                        />
+                                    </Box>
+                                </Paper>
+                            </motion.div>
+                        ))}
+                    </AnimatePresence>
+                </Box>
+            )}
         </Box>
     );
 }

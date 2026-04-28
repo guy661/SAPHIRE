@@ -75,39 +75,6 @@ export async function getDashboardById(id: string) {
     return handleResponse(response);
 }
 
-export async function getDashboardJobs(id: string) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}/jobs`);
-    return handleResponse(response);
-}
-
-export async function runDashboardSearch(id: string, rssCategories: string[]) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}/run-search`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rss_categories: rssCategories }),
-    });
-    return handleResponse(response);
-}
-
-export async function getJobStatus(jobId: string) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/job/${jobId}`);
-    return handleResponse(response);
-}
-
-export async function getJobClusters(jobId: string) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/jobs/${jobId}/clusters`);
-    return handleResponse(response);
-}
-
-export async function postJobChat(jobId: string, message: string, chatHistory: any[], summary: string) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/jobs/${jobId}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message, chatHistory, summary }),
-    });
-    return handleResponse(response);
-}
-
 export async function runPersonalizationChat(dashboardId: string, message: string) {
     const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${dashboardId}/personalization-chat`, {
         method: 'POST',
@@ -122,16 +89,12 @@ export async function getAvailableRssCategories() {
     return handleResponse(response);
 }
 
-export async function submitFeedback(clusterId: number, feedbackType: 'like' | 'dislike' | null) {
-    const response = await fetchWithAuth(`${API_BASE_URL}/feedback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clusterId, feedbackType }),
-    });
+export async function getDashboardArticles(id: string) {
+    const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}/articles`);
     return handleResponse(response);
 }
 
-export async function updateDashboardSettings(id: string, settings: { summary_style?: string, interval_minutes?: number, is_active?: boolean }) {
+export async function updateDashboardSettings(id: string, settings: { summary_style?: string, is_active?: boolean }) {
     const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },

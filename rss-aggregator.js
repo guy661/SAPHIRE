@@ -356,7 +356,9 @@ async function getAggregatedFeed(categories = [], minDate = null, keywords = {})
   // Sort by date
   const sortedItems = filteredItems.sort((a, b) => {
       try {
-        return new Date(b.pubDate) - new Date(a.pubDate);
+        const dateA = a.pubDate ? new Date(a.pubDate) : new Date(0);
+        const dateB = b.pubDate ? new Date(b.pubDate) : new Date(0);
+        return dateB - dateA;
       } catch(e) {
         return 0; 
       }

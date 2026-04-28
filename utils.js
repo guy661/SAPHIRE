@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const OpenAI = require('openai');
 
 const COLORS = {
     red: '\x1b[31m',
@@ -64,191 +64,120 @@ class Logger {
     }
 }
 
-const apiKeys = (process.env.GEMINI_API_KEYS || '').split(',').filter(Boolean).map(k => k.trim());
-const apiInstances = apiKeys.map(key => new GoogleGenerativeAI(key));
+// --- OLLAMA CONFIGURATION ---
+const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434/v1';
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1';
 
-// --- Global Rate Limiting State ---
-const apiKeyRequestTimestamps = apiKeys.map(() => []);
-const REQUEST_LIMIT_PER_MINUTE = 14; // Gemini Free is 15 RPM, keep safety buffer
-const TIME_WINDOW_MS = 60000;
-let apiKeyIndex = 0; 
-const rateLimitLogger = new Logger('RateLimiter', 'yellow', '⏳');
+const aiLogger = new Logger('LocalAI', 'magenta', EMOJIS.semantic);
 
-// Helper to artificially exhaust a key if we get a 429
-function markKeyAsBusy(index) {
-    const now = Date.now();
-    // Fill it up with timestamps from 'now' so it won't be used for a minute
-    const currentTimestamps = apiKeyRequestTimestamps[index];
-    const needed = REQUEST_LIMIT_PER_MINUTE - currentTimestamps.length;
-    for(let i=0; i < needed + 1; i++) {
-        currentTimestamps.push(now);
-    }
-}
+aiLogger.info(`Initializing Pure Local AI (Ollama) at ${OLLAMA_BASE_URL} with model ${OLLAMA_MODEL}`);
 
-async function getNextAvailableApiClient() {
-    if (apiInstances.length === 0) {
-        throw new Error('No API keys provided for Gemini.');
-    }
+const ollamaClient = new OpenAI({
+    baseURL: OLLAMA_BASE_URL,
+    apiKey: 'ollama', // Required by SDK, unused by Ollama
+});
 
-    // Try finding a key multiple times to handle race conditions or rapid exhaustion
-    while (true) {
-        let earliestNextAvailableTime = Infinity;
-        let bestCandidateIndex = -1;
+// --- UNIFIED AI FUNCTIONS (Ollama Only) ---
 
-        for (let i = 0; i < apiInstances.length; i++) {
-            const currentIndex = (apiKeyIndex + i) % apiInstances.length;
-            const timestamps = apiKeyRequestTimestamps[currentIndex];
-            const now = Date.now();
-
-            // Clean up old timestamps
-            while (timestamps.length > 0 && now - timestamps[0] > TIME_WINDOW_MS) {
-                timestamps.shift();
-            }
-
-            if (timestamps.length < REQUEST_LIMIT_PER_MINUTE) {
-                timestamps.push(now); // Reserve slot
-                apiKeyIndex = (currentIndex + 1) % apiInstances.length;
-                return { client: apiInstances[currentIndex], index: currentIndex };
-            }
-
-            // Track wait time
-            const nextFree = timestamps[0] + TIME_WINDOW_MS;
-            if (nextFree < earliestNextAvailableTime) {
-                earliestNextAvailableTime = nextFree;
-            }
-        }
-
-        // All keys busy. Wait intelligently.
-        const now = Date.now();
-        const waitTime = Math.max(1000, earliestNextAvailableTime - now + 100); // at least 1s, plus buffer
+/**
+ * Executes a prompt against the local Ollama instance.
+ */
+async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
+    try {
+        const response = await ollamaClient.chat.completions.create({
+            model: OLLAMA_MODEL,
+            messages: [{ role: 'user', content: prompt }],
+            temperature: temperature,
+            response_format: jsonMode ? { type: 'json_object' } : { type: 'text' },
+            max_tokens: 8192
+        });
         
-        rateLimitLogger.warn(`All ${apiInstances.length} API keys busy. Waiting ${Math.ceil(waitTime/1000)}s...`);
-        await new Promise(resolve => setTimeout(resolve, waitTime));
+        return response.choices[0].message.content;
+    } catch (error) {
+        aiLogger.error(`Ollama Generative Error: ${error.message}`);
+        throw error;
     }
 }
 
-async function callGemini(prompt, model = 'gemini-2.5-flash', temperature = 0, jsonMode = false) {
-    const fallbackModel = 'gemini-2.0-flash-lite-preview-02-05';
-    let currentModel = model;
-    let retries = 0;
-    const maxRetries = 10; 
+/**
+ * Executes a chat against the local Ollama instance.
+ * Handles format conversion from Gemini-style history/tools to OpenAI/Ollama style.
+ */
+async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
+    // 1. Convert History (Gemini -> OpenAI)
+    const messages = chatHistory.map(entry => {
+        const content = entry.parts.map(p => p.text).join('');
+        let role = 'user';
+        if (entry.role === 'model') role = 'assistant';
+        if (entry.role === 'system') role = 'system';
+        
+        return {
+            role: role,
+            content: content
+        };
+    });
 
-    while (retries < maxRetries) {
-        let currentKeyIndex = -1;
-        try {
-            const { client, index } = await getNextAvailableApiClient();
-            currentKeyIndex = index;
-            
-            const config = { 
-                model: currentModel,
-                generationConfig: {
-                    temperature: temperature,
-                    maxOutputTokens: 2048,
-                    responseMimeType: jsonMode ? "application/json" : "text/plain"
-                }
-            };
-            
-            const generativeModel = client.getGenerativeModel(config);
-            const result = await generativeModel.generateContent(prompt);
-            const response = await result.response;
-            return response.text();
-
-        } catch (error) {
-            retries++;
-            const isRateLimit = error.message.includes('429') || error.status === 429 || error.message.includes('Resource has been exhausted');
-            const isNetworkError = error.message.includes('fetch failed') || error.message.includes('503') || error.message.includes('500');
-            const isModelNotFoundError = error.message.includes('404') || error.message.includes('not found');
-
-            if (isRateLimit || isNetworkError || isModelNotFoundError) {
-                const errorType = isRateLimit ? 'Rate Limit' : (isModelNotFoundError ? 'Model Not Found' : 'Network Error');
-                rateLimitLogger.warn(`Key #${currentKeyIndex} hit ${errorType} on model ${currentModel}. Swapping key...`);
-                
-                if (currentKeyIndex !== -1 && isRateLimit) markKeyAsBusy(currentKeyIndex);
-                
-                // Fallback logic: If we fail repeatedly OR if the model is just not found (404), switch to fallback
-                if ((retries > (apiKeys.length * 1.5) || isModelNotFoundError) && currentModel !== fallbackModel) {
-                     rateLimitLogger.warn(`Primary model ${currentModel} failed (${errorType}). Switching to FALLBACK: ${fallbackModel}`);
-                     currentModel = fallbackModel;
-                }
-                
-                // Small backoff for network errors
-                if (isNetworkError) await new Promise(resolve => setTimeout(resolve, 1000));
-
-            } else {
-                rateLimitLogger.error(`Gemini Error (Attempt ${retries}): ${error.message}`);
-                if (retries >= 3) throw error; 
-                await new Promise(resolve => setTimeout(resolve, 1000 * retries));
+    // 2. Convert Tools (Gemini -> OpenAI)
+    let openaiTools = undefined;
+    if (tools && tools.length > 0) {
+        openaiTools = [];
+        tools.forEach(toolGroup => {
+            if (toolGroup.functionDeclarations) {
+                toolGroup.functionDeclarations.forEach(fn => {
+                    openaiTools.push({
+                        type: 'function',
+                        function: {
+                            name: fn.name,
+                            description: fn.description,
+                            parameters: fn.parameters
+                        }
+                    });
+                });
             }
-        }
+        });
     }
-    throw new Error(`Gemini call failed after ${maxRetries} retries.`);
+
+    try {
+        const response = await ollamaClient.chat.completions.create({
+            model: OLLAMA_MODEL,
+            messages: messages,
+            temperature: temperature,
+            tools: openaiTools,
+            tool_choice: openaiTools ? 'auto' : 'none'
+        });
+
+        const choice = response.choices[0];
+        const message = choice.message;
+
+        // 3. Handle Tool Calls (OpenAI -> Gemini format)
+        if (message.tool_calls && message.tool_calls.length > 0) {
+            return message.tool_calls.map(tc => ({
+                name: tc.function.name,
+                args: JSON.parse(tc.function.arguments)
+            }));
+        }
+
+        return message.content;
+
+    } catch (error) {
+        aiLogger.error(`Ollama Chat Error: ${error.message}`);
+        throw error;
+    }
 }
 
-async function callGeminiChat(chatHistory, tools, model = 'gemini-2.5-flash', temperature = 0.5) {
-    const fallbackModel = 'gemini-2.0-flash-lite-preview-02-05';
-    let currentModel = model;
-    let retries = 0;
-    const maxRetries = 10;
-
-    while (retries < maxRetries) {
-        let currentKeyIndex = -1;
-        try {
-            const { client, index } = await getNextAvailableApiClient();
-            currentKeyIndex = index;
-
-            const generativeModel = client.getGenerativeModel({
-                model: currentModel,
-                tools: tools,
-                generationConfig: { temperature: temperature }
-            });
-
-            const chat = generativeModel.startChat({
-                history: chatHistory
-            });
-
-            const lastMessageParts = chatHistory[chatHistory.length - 1].parts;
-            const result = await chat.sendMessage(lastMessageParts);
-            const response = await result.response;
-            
-            return response.functionCalls() ? response.functionCalls() : response.text();
-
-        } catch (error) {
-            retries++;
-            const isRateLimit = error.message.includes('429') || error.status === 429 || error.message.includes('Resource has been exhausted');
-            const isNetworkError = error.message.includes('fetch failed') || error.message.includes('503') || error.message.includes('500');
-            const isModelNotFoundError = error.message.includes('404') || error.message.includes('not found');
-            
-            if (isRateLimit || isNetworkError || isModelNotFoundError) {
-                const errorType = isRateLimit ? 'Rate Limit' : (isModelNotFoundError ? 'Model Not Found' : 'Network Error');
-                rateLimitLogger.warn(`Key #${currentKeyIndex} hit ${errorType} in CHAT on model ${currentModel}. Swapping key...`);
-                
-                if (currentKeyIndex !== -1 && isRateLimit) markKeyAsBusy(currentKeyIndex);
-
-                 if ((retries > (apiKeys.length * 1.5) || isModelNotFoundError) && currentModel !== fallbackModel) {
-                    rateLimitLogger.warn(`Primary model ${currentModel} failed (${errorType}). Switching to FALLBACK: ${fallbackModel}`);
-                    currentModel = fallbackModel;
-               }
-               
-               if (isNetworkError) await new Promise(resolve => setTimeout(resolve, 1000));
-
-            } else {
-                rateLimitLogger.error(`Gemini Chat Error (Attempt ${retries}): ${error.message}`);
-                if (retries >= 3) throw error;
-                await new Promise(resolve => setTimeout(resolve, 1000 * retries));
-            }
-        }
-    }
-    throw new Error(`Gemini CHAT failed after ${maxRetries} retries.`);
-}
-
+/**
+ * Returns concurrency limit. 
+ * Since we are local, we simulate a queue of parallel tasks feeding into Ollama.
+ * Increased to 10 for aggressive parallelism with small chunks.
+ */
 function getApiKeyCount() {
-    return apiKeys.length;
+    return 10; 
 }
 
 const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);
 async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed') {
     let lastError = null;
-    for (let i = 0; i < maxRetries; i++) {
+    for (let i = 0; i <= maxRetries; i++) {
         try {
             return await fn();
         } catch (error) {
@@ -262,4 +191,4 @@ async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed'
     throw finalError;
 }
 
-module.exports = { getApiKeyCount, callGemini, callGeminiChat, retry, Logger, EMOJIS };
+module.exports = { getApiKeyCount, callLocalAI, callLocalAIChat, retry, Logger, EMOJIS };

@@ -5,19 +5,18 @@ const pLimit = require('p-limit');
 const aiLogger = new Logger('LocalAI', 'cyan', EMOJIS.robot);
 
 // Strictness threshold. 
-// 0.25 excludes pure noise but allows semantic variations.
-// < 0.20 is usually irrelevant. > 0.4 is very strong match.
-const MIN_RELEVANCE_SCORE = 0.5; 
+// Auf 0.30 angepasst: Ein expliziter Trump-Artikel wurde mit 0.34 bewertet. 
+// 0.30 fängt diese sehr eng an der Grenze liegenden, aber relevanten Artikel sicher auf, filtert aber extremen Müll (< 0.25) weiterhin.
+const MIN_RELEVANCE_SCORE = 0.30; 
 
 // Cache the model globally so we don't reload it for every job
 let extractor = null;
 
 async function getExtractor() {
     if (!extractor) {
-        aiLogger.info('Loading local embedding model (Xenova/bge-small-en-v1.5)...');
-        // This downloads the model once and caches it locally
-        // We use the multilingual model to support German and English inputs correctly.
-        extractor = await pipeline('feature-extraction', 'Xenova/bge-small-en-v1.5', {
+        aiLogger.info('Loading local embedding model (Xenova/paraphrase-multilingual-MiniLM-L12-v2)...');
+        // We use a true multilingual model now for better German support.
+        extractor = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
             quantized: true, // Use quantized version for speed
         });
         aiLogger.info('Local multilingual model loaded successfully.');
@@ -41,6 +40,15 @@ function cosineSimilarity(vecA, vecB) {
     return dotProduct / (magnitudeA * magnitudeB);
 }
 
+// Helper to remove HTML tags and decode entities partially
+function cleanText(text) {
+    if (!text) return '';
+    return text
+        .replace(/<[^>]*>/g, ' ') // Remove HTML tags
+        .replace(/\s+/g, ' ')     // Collapse whitespace
+        .trim();
+}
+
 /**
  * Sorts and filters a list of articles based on semantic similarity to the user intent.
  * Runs locally on CPU.
@@ -49,69 +57,31 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
     if (!articles || articles.length === 0) return [];
 
     const totalStart = Date.now();
-    const initialCount = articles.length;
-
-    // --- STAGE 1: Ultra-Fast Keyword Pre-Filter ---
-    // This dramatically speeds up processing by removing obvious garbage (0% lexical overlap)
-    // before running the expensive neural network.
     
-    // 1. Extract keywords from intent (naive approach: split by space, remove short words)
-    const keywords = userIntent.toLowerCase()
-        .split(/[\s,.;:!?]+/)
-        .filter(w => w.length > 3) // Filter out "der", "die", "und", "the", "and"...
-        .map(w => w.trim());
-
-    // 2. Score all articles based on keyword presence
-    // This runs in milliseconds even for 20k items.
-    let candidates = articles.map(article => {
-        const text = `${article.title} ${article.contentSnippet || ''}`.toLowerCase();
-        let keywordScore = 0;
-        for (const word of keywords) {
-            if (text.includes(word)) keywordScore++;
-        }
-        return { article, keywordScore };
-    });
-
-    // 3. Keep only the candidates that have at least SOME overlap, or top N if too many.
-    // We keep 3x the requested topK to give the AI enough choice, but cap at 2000 to ensure speed.
-    const PRE_FILTER_LIMIT = Math.max(topK * 3, 2000); 
-    
-    // Sort by keyword score first to keep the "most likely" candidates
-    candidates.sort((a, b) => b.keywordScore - a.keywordScore);
-    
-    // Slice to limit
-    let reducedArticles = candidates
-        .slice(0, PRE_FILTER_LIMIT)
-        .map(c => c.article);
-
-    const preFilterCount = reducedArticles.length;
-    aiLogger.info(`Stage 1 (Keyword Filter): Reduced ${initialCount} -> ${preFilterCount} items in ${Date.now() - totalStart}ms.`);
-
-    if (reducedArticles.length === 0) return [];
-
-    // --- STAGE 2: Neural Embeddings (The Heavy Lifting) ---
-    // Now we only run the AI on the survivors.
+    // --- STAGE 2: Neural Embeddings (Directly, no Keyword Filter) ---
     
     const pipe = await getExtractor();
-    aiLogger.info(`Stage 2 (AI): Calculating semantic scores for ${preFilterCount} candidates (Batched)...`);
+    aiLogger.info(`Calculating semantic scores for ${articles.length} candidates (Batched)...`);
 
     // 1. Embed the User Intent
     const intentOutput = await pipe(userIntent, { pooling: 'mean', normalize: true });
     const intentEmbedding = intentOutput.data;
 
-    // 2. Embed Articles in Larger Batches
-    const BATCH_SIZE = 64; // Increased for throughput
+    // 2. Embed Articles in Batches
+    const BATCH_SIZE = 32; 
     let scoredArticles = [];
     let processed = 0;
 
-    for (let i = 0; i < preFilterCount; i += BATCH_SIZE) {
-        const batch = reducedArticles.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+        const batch = articles.slice(i, i + BATCH_SIZE);
         
-        // Optimize Input: Title is 90% of the signal. 
-        // We limit context to 150 chars to speed up tokenization and inference.
-        const textsToEmbed = batch.map(a => 
-            `${a.title} ${(a.contentSnippet || '').substring(0, 50)}`.substring(0, 150)
-        );
+        // Optimize Input: Use full title and a good chunk of the snippet.
+        // We clean HTML to reduce noise.
+        const textsToEmbed = batch.map(a => {
+            const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
+            // Combine Title and Snippet. Limit total length to ~500 chars.
+            return `${a.title}. ${cleanSnippet}`.substring(0, 500);
+        });
 
         try {
             const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
@@ -124,8 +94,8 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
             }
 
             processed += batch.length;
-            if (processed % 500 < BATCH_SIZE) {
-                 aiLogger.debug(`AI Progress: ${processed}/${preFilterCount}`);
+            if (processed % 100 === 0) {
+                 aiLogger.debug(`AI Progress: ${processed}/${articles.length}`);
             }
 
         } catch (e) {
@@ -134,16 +104,30 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
     }
 
     // 3. Strict Filtering
-    const beforeFilterCount = scoredArticles.length;
-    scoredArticles = scoredArticles.filter(a => a.relevanceScore >= MIN_RELEVANCE_SCORE);
+    const keptArticles = scoredArticles.filter(a => a.relevanceScore >= MIN_RELEVANCE_SCORE);
+    const discardedArticles = scoredArticles.filter(a => a.relevanceScore < MIN_RELEVANCE_SCORE);
     
     // 4. Sort by Score DESC
-    scoredArticles.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    keptArticles.sort((a, b) => b.relevanceScore - a.relevanceScore);
+    discardedArticles.sort((a, b) => b.relevanceScore - a.relevanceScore); // Sort discarded too to see the "best losers"
 
-    aiLogger.info(`Local AI Filter Done: Kept ${scoredArticles.length} relevant items. Total time: ${(Date.now() - totalStart) / 1000}s`);
+    if (keptArticles.length > 0) {
+        const highest = keptArticles[0];
+        const lowest = keptArticles[keptArticles.length - 1];
+        aiLogger.info(`[Score Stats] Highest: "${highest.title}" (${highest.relevanceScore.toFixed(4)}) | Lowest: "${lowest.title}" (${lowest.relevanceScore.toFixed(4)})`);
+    }
+
+    // Log the "best losers" to help debug strictness
+    if (discardedArticles.length > 0) {
+        const bestLosers = discardedArticles.slice(0, 3);
+        aiLogger.info(`[Discarded Debug] Top 3 rejected (Threshold ${MIN_RELEVANCE_SCORE}):`);
+        bestLosers.forEach(a => aiLogger.info(` - [${a.relevanceScore.toFixed(4)}] ${a.title}`));
+    }
+
+    aiLogger.info(`Local AI Filter Done: Kept ${keptArticles.length} relevant items (Discarded ${discardedArticles.length}). Total time: ${(Date.now() - totalStart) / 1000}s`);
 
     // 5. Slice to requested limit
-    return scoredArticles.slice(0, topK);
+    return keptArticles.slice(0, topK);
 }
 
 module.exports = { filterArticlesByRelevanceLocal };

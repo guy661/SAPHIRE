@@ -2,6 +2,8 @@ import { useParams, Link as RouterLink, useNavigate, useLocation } from 'react-r
 import { Box, TextField, Button, Paper, List, ListItem, ListItemText, Typography, Container, CircularProgress } from '@mui/material';
 import { useState } from 'react';
 import { runPersonalizationChat } from '../services/api';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface Message {
     sender: 'user' | 'model';
@@ -17,6 +19,7 @@ export default function ChatPage() {
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
+    const [isFinished, setIsFinished] = useState(false);
 
     const handleSend = async () => {
         if (input.trim() && dashboardId && !isLoading) {
@@ -32,18 +35,8 @@ export default function ChatPage() {
                 const modelMessage: Message = { sender: 'model', text: response.message };
                 setMessages(prev => [...prev, modelMessage]);
 
-                // If the backend indicates the process is done, navigate based on context
                 if (response.isDone) {
-                    const params = new URLSearchParams(location.search);
-                    const isOnboarding = params.get('onboarding') === 'true';
-                    
-                    setTimeout(() => {
-                        if (isOnboarding) {
-                            navigate(`/dashboard/${dashboardId}/settings`);
-                        } else {
-                            navigate(`/dashboard/${dashboardId}`);
-                        }
-                    }, 1500);
+                    setIsFinished(true);
                 }
 
             } catch (error) {
@@ -53,6 +46,17 @@ export default function ChatPage() {
             } finally {
                 setIsLoading(false);
             }
+        }
+    };
+
+    const handleContinue = () => {
+        const params = new URLSearchParams(location.search);
+        const isOnboarding = params.get('onboarding') === 'true';
+        
+        if (isOnboarding) {
+            navigate(`/dashboard/${dashboardId}/settings`);
+        } else {
+            navigate(`/dashboard/${dashboardId}`);
         }
     };
 
@@ -81,27 +85,41 @@ export default function ChatPage() {
                                     maxWidth: '70%'
                                 }}
                             >
-                                <ListItemText primary={msg.text} />
+                                {msg.sender === 'model' ? (
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {msg.text}
+                                    </ReactMarkdown>
+                                ) : (
+                                    <ListItemText primary={msg.text} />
+                                )}
                             </Paper>
                         </ListItem>
                     ))}
                     {isLoading && <ListItem sx={{justifyContent: 'flex-start'}}><CircularProgress size={24} /></ListItem>}
                 </List>
 
-                <Box sx={{ p: 2, display: 'flex', borderTop: '1px solid', borderColor: 'divider' }}>
-                    <TextField
-                        fullWidth
-                        variant="outlined"
-                        placeholder="Ihre Antwort..."
-                        value={input}
-                        onChange={(e) => setInput(e.target.value)}
-                        onKeyPress={(e) => e.key === 'Enter' && handleSend()}
-                        disabled={isLoading}
-                    />
-                    <Button variant="contained" onClick={handleSend} sx={{ ml: 2 }} disabled={isLoading}>
-                        Senden
-                    </Button>
-                </Box>
+                {!isFinished ? (
+                    <Box sx={{ p: 2, display: 'flex', borderTop: '1px solid', borderColor: 'divider' }}>
+                        <TextField
+                            fullWidth
+                            variant="outlined"
+                            placeholder="Ihre Antwort..."
+                            value={input}
+                            onChange={(e) => setInput(e.target.value)}
+                            onKeyPress={(e) => e.key === 'Enter' && handleSend()}
+                            disabled={isLoading}
+                        />
+                        <Button variant="contained" onClick={handleSend} sx={{ ml: 2 }} disabled={isLoading}>
+                            Senden
+                        </Button>
+                    </Box>
+                ) : (
+                    <Box sx={{ p: 2, display: 'flex', justifyContent: 'center', borderTop: '1px solid', borderColor: 'divider', bgcolor: 'action.hover' }}>
+                        <Button variant="contained" color="success" size="large" onClick={handleContinue}>
+                            Weiter zum Dashboard
+                        </Button>
+                    </Box>
+                )}
             </Paper>
         </Container>
     );

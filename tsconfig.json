@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "rootDir": ".",
+    "strict": true,                /* Enable all strict type-checking options. */
+    "noImplicitAny": false,        /* Allow 'any' for now during migration, will tighten later. */
+    "esModuleInterop": true,       /* Enables emit interoperability between CommonJS and ES Modules */
+    "skipLibCheck": true,          /* Skip type checking of declaration files. */
+    "forceConsistentCasingInFileNames": true,
+    "allowJs": true,               /* Allow JavaScript files to be compiled. */
+    "checkJs": false               /* Don't report errors in .js files yet, we turn this on gradually. */
+  },
+  "include": ["./**/*"],
+  "exclude": ["node_modules", "frontend", "dist"]
+}
