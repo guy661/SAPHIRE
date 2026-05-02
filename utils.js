@@ -136,12 +136,23 @@ async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
 async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
     if (genAI) {
         try {
-            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            // 1. Extract system instruction if present
+            const systemMessage = chatHistory.find(m => m.role === 'system');
+            const systemInstruction = systemMessage ? systemMessage.parts[0].text : undefined;
+
+            // 2. Filter history to only include 'user' and 'model' (Gemini requirement)
+            // and exclude the very last message which will be sent via sendMessage
+            const filteredHistory = chatHistory
+                .filter(m => m.role === 'user' || m.role === 'model')
+                .slice(0, -1);
+
+            const model = genAI.getGenerativeModel({ 
+                model: "gemini-1.5-flash",
+                systemInstruction: systemInstruction 
+            });
             
-            // Format history for Gemini
-            // chatHistory is already in Gemini format according to task.js
             const chat = model.startChat({
-                history: chatHistory.slice(0, -1), // All but the last message
+                history: filteredHistory,
                 generationConfig: {
                     temperature: temperature,
                 },
