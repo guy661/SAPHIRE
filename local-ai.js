@@ -75,8 +75,13 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
             intentEmbedding = intentRes.embedding.values;
 
             // 2. Embed Articles in Batches (Gemini supports batching)
-            const BATCH_SIZE = 50; 
+            const BATCH_SIZE = 20; // Reduced batch size for finer control
             for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+                // Add a small delay between batches to stay under rate limits (e.g. 2 seconds)
+                if (i > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+
                 const batch = articles.slice(i, i + BATCH_SIZE);
                 const texts = batch.map(a => {
                     const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
@@ -151,7 +156,5 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
     aiLogger.info(`AI Filter Done: Kept ${keptArticles.length}/${articles.length}. Time: ${(Date.now() - totalStart) / 1000}s`);
     return keptArticles.slice(0, topK);
 }
-
-module.exports = { filterArticlesByRelevanceLocal };
 
 module.exports = { filterArticlesByRelevanceLocal };
