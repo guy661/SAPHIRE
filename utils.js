@@ -64,25 +64,56 @@ class Logger {
     }
 }
 
-// --- OLLAMA CONFIGURATION ---
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+
+// --- AI CONFIGURATION ---
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS; // Support both singular and plural (comma separated)
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434/v1';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1';
 
-const aiLogger = new Logger('LocalAI', 'magenta', EMOJIS.semantic);
+const aiLogger = new Logger('AI-Manager', 'magenta', EMOJIS.semantic);
 
-aiLogger.info(`Initializing Pure Local AI (Ollama) at ${OLLAMA_BASE_URL} with model ${OLLAMA_MODEL}`);
+// Initialize Clients
+let genAI = null;
+if (GEMINI_API_KEY) {
+    // If plural, take the first one for now or handle rotation if needed. 
+    // For simplicity, we take the first available key.
+    const firstKey = GEMINI_API_KEY.split(',')[0].trim();
+    genAI = new GoogleGenerativeAI(firstKey);
+    aiLogger.info('Initializing Cloud AI (Google Gemini)');
+} else {
+    aiLogger.info(`Initializing Local AI (Ollama) at ${OLLAMA_BASE_URL} with model ${OLLAMA_MODEL}`);
+}
 
 const ollamaClient = new OpenAI({
     baseURL: OLLAMA_BASE_URL,
-    apiKey: 'ollama', // Required by SDK, unused by Ollama
+    apiKey: 'ollama', 
 });
 
-// --- UNIFIED AI FUNCTIONS (Ollama Only) ---
+// --- UNIFIED AI FUNCTIONS ---
 
 /**
- * Executes a prompt against the local Ollama instance.
+ * Executes a prompt against either Gemini (Cloud) or Ollama (Local).
  */
 async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
+    if (genAI) {
+        try {
+            const model = genAI.getGenerativeModel({ 
+                model: "gemini-1.5-flash",
+                generationConfig: {
+                    temperature: temperature,
+                    responseMimeType: jsonMode ? "application/json" : "text/plain",
+                }
+            });
+            const result = await model.generateContent(prompt);
+            return result.response.text();
+        } catch (error) {
+            aiLogger.error(`Gemini Cloud Error: ${error.message}`);
+            // Fallback to Ollama if Cloud fails? No, the task says "Use Cloud if key exists".
+            throw error;
+        }
+    }
+
     try {
         const response = await ollamaClient.chat.completions.create({
             model: OLLAMA_MODEL,
@@ -94,17 +125,38 @@ async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
         
         return response.choices[0].message.content;
     } catch (error) {
-        aiLogger.error(`Ollama Generative Error: ${error.message}`);
+        aiLogger.error(`Ollama Local Error: ${error.message}`);
         throw error;
     }
 }
 
 /**
- * Executes a chat against the local Ollama instance.
- * Handles format conversion from Gemini-style history/tools to OpenAI/Ollama style.
+ * Executes a chat against either Gemini (Cloud) or Ollama (Local).
  */
 async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
-    // 1. Convert History (Gemini -> OpenAI)
+    if (genAI) {
+        try {
+            const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+            
+            // Format history for Gemini
+            // chatHistory is already in Gemini format according to task.js
+            const chat = model.startChat({
+                history: chatHistory.slice(0, -1), // All but the last message
+                generationConfig: {
+                    temperature: temperature,
+                },
+            });
+
+            const lastMessage = chatHistory[chatHistory.length - 1].parts[0].text;
+            const result = await chat.sendMessage(lastMessage);
+            return result.response.text();
+        } catch (error) {
+            aiLogger.error(`Gemini Cloud Chat Error: ${error.message}`);
+            throw error;
+        }
+    }
+
+    // --- OLLAMA FALLBACK ---
     const messages = chatHistory.map(entry => {
         const content = entry.parts.map(p => p.text).join('');
         let role = 'user';
@@ -117,7 +169,6 @@ async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
         };
     });
 
-    // 2. Convert Tools (Gemini -> OpenAI)
     let openaiTools = undefined;
     if (tools && tools.length > 0) {
         openaiTools = [];
@@ -149,7 +200,6 @@ async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
         const choice = response.choices[0];
         const message = choice.message;
 
-        // 3. Handle Tool Calls (OpenAI -> Gemini format)
         if (message.tool_calls && message.tool_calls.length > 0) {
             return message.tool_calls.map(tc => ({
                 name: tc.function.name,
@@ -166,12 +216,11 @@ async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
 }
 
 /**
- * Returns concurrency limit. 
- * Since we are local, we simulate a queue of parallel tasks feeding into Ollama.
- * Increased to 10 for aggressive parallelism with small chunks.
+ * Returns the number of available API keys.
  */
 function getApiKeyCount() {
-    return 10; 
+    if (!GEMINI_API_KEY) return 0;
+    return GEMINI_API_KEY.split(',').length;
 }
 
 const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);
