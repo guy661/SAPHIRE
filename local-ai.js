@@ -67,7 +67,7 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
     if (genAI) {
         // --- CLOUD EMBEDDINGS (GEMINI) ---
         aiLogger.info(`Using Cloud Embeddings (Gemini) for ${articles.length} articles...`);
-        const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
+        const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
 
         try {
             // 1. Embed Intent
