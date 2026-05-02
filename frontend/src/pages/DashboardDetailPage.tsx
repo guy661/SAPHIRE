@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getDashboardById, getDashboardArticles } from '../services/api';
+import { getDashboardById, getDashboardArticles, API_BASE_URL } from '../services/api';
 import { 
     Box, Typography, CircularProgress, Alert, Paper, Link, Chip, IconButton, Button
 } from '@mui/material';
@@ -51,7 +51,7 @@ export default function DashboardDetailPage() {
         };
 
         const setupSSE = () => {
-            eventSource = new EventSource(`http://localhost:3001/api/dashboards/${id}/stream`, {
+            eventSource = new EventSource(`${API_BASE_URL}/dashboards/${id}/stream`, {
                 withCredentials: true
             });
 
