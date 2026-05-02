@@ -99,7 +99,7 @@ async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
     if (genAI) {
         try {
             const model = genAI.getGenerativeModel({ 
-                model: "gemini-3.1-flash-lite",
+                model: "gemini-2.5-flash",
                 generationConfig: {
                     temperature: temperature,
                     responseMimeType: jsonMode ? "application/json" : "text/plain",
@@ -147,7 +147,7 @@ async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
                 .slice(0, -1);
 
             const model = genAI.getGenerativeModel({ 
-                model: "gemini-3.1-flash-lite",
+                model: "gemini-2.5-flash",
                 systemInstruction: systemInstruction 
             });
             
