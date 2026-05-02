@@ -34,7 +34,14 @@ const microSummaryWorker = new BullMQWorker('micro-summary', async (job) => {
         summaryLogger.error(`Error processing micro-summary for article ${dashboardArticleId}:`, error);
         throw error;
     }
-}, { connection: redisConnection });
+}, { 
+    connection: redisConnection,
+    concurrency: 1,
+    limiter: {
+        max: 2,
+        duration: 60000
+    }
+});
 
 summaryLogger.info('Micro-Summary worker started and listening for jobs.');
 
