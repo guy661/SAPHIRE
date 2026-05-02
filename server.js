@@ -33,8 +33,9 @@ async function main() {
 
     const app = express();
     app.use(cors({
-        origin: ['http://localhost:3001', 'http://localhost:5173'],
-        credentials: true,
+      origin: 'https://saphire-p7zs.vercel.app',
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+      credentials: true
     }));
     app.use(express.json());
 
