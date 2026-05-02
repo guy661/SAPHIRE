@@ -128,6 +128,16 @@ async function addDashboardArticle(dashboardId, article, relevanceScore, microSu
     return res.rows[0];
 }
 
+async function findExistingSummaryByLink(link) {
+    const res = await pool.query(
+        `SELECT micro_summary FROM dashboard_articles 
+         WHERE link = $1 AND micro_summary IS NOT NULL AND micro_summary != '' 
+         LIMIT 1`,
+        [link]
+    );
+    return res.rows[0] ? res.rows[0].micro_summary : null;
+}
+
 async function getDashboardArticles(dashboardId, limit = 50) {
     const res = await pool.query(
         `SELECT * FROM dashboard_articles 

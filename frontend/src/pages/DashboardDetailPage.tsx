@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getDashboardById, getDashboardArticles, API_BASE_URL } from '../services/api';
+import { getDashboardById, getDashboardArticles, API_BASE_URL, summarizeArticle } from '../services/api';
 import { 
-    Box, Typography, CircularProgress, Alert, Paper, Link, Chip, IconButton, Button
+    Box, Typography, CircularProgress, Alert, Paper, Link, Chip, IconButton, Button, Skeleton
 } from '@mui/material';
-import { ArrowLeft, Gear } from '@phosphor-icons/react';
+import { ArrowLeft, Gear, MagicWand } from '@phosphor-icons/react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -27,6 +27,27 @@ export default function DashboardDetailPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [isStreaming, setIsStreaming] = useState(false);
+    const [summarizingIds, setSummarizingIds] = useState<Set<string>>(new Set());
+
+    const handleSummarize = async (articleId: string) => {
+        if (summarizingIds.has(articleId)) return;
+        
+        setSummarizingIds(prev => new Set(prev).add(articleId));
+        try {
+            const data = await summarizeArticle(articleId);
+            setArticles(prev => prev.map(art => 
+                art.id === articleId ? { ...art, micro_summary: data.summary } : art
+            ));
+        } catch (err: any) {
+            console.error("Summarization failed:", err);
+        } finally {
+            setSummarizingIds(prev => {
+                const next = new Set(prev);
+                next.delete(articleId);
+                return next;
+            });
+        }
+    };
 
     useEffect(() => {
         if (!id) return;
@@ -211,6 +232,28 @@ export default function DashboardDetailPage() {
                                             </ReactMarkdown>
                                         </Box>
                                     ) : (
+                                        <Box sx={{ mt: 2 }}>
+                                            {summarizingIds.has(article.id) ? (
+                                                <Box sx={{ p: 2, bgcolor: 'action.hover', borderRadius: 2 }}>
+                                                    <Skeleton variant="text" />
+                                                    <Skeleton variant="text" />
+                                                    <Skeleton variant="text" width="60%" />
+                                                </Box>
+                                            ) : (
+                                                <Button 
+                                                    size="small" 
+                                                    startIcon={<MagicWand />}
+                                                    onClick={() => handleSummarize(article.id)}
+                                                    sx={{ 
+                                                        color: 'text.secondary',
+                                                        '&:hover': { color: 'primary.main', bgcolor: 'primary.lighter' }
+                                                    }}
+                                                >
+                                                    ✨ KI-Zusammenfassung laden
+                                                </Button>
+                                            )}
+                                        </Box>
+                                    )}
                                         <Box display="flex" alignItems="center" gap={1} mt={2}>
                                             <CircularProgress size={16} />
                                             <Typography variant="caption" color="text.secondary">

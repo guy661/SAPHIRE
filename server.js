@@ -428,7 +428,39 @@ async function main() {
             res.json(categoryNames);
         } catch (error) {
             serverLogger.error('Error fetching RSS categories:', error);
-            res.status(500).json({ error: 'Failed to fetch RSS categories' });
+            res.status(500).json({ error: 'Failed to fetch categories' });
+        }
+    });
+
+    app.post('/api/articles/:id/summarize', isAuthenticated, async (req, res) => {
+        const { id } = req.params;
+        try {
+            // 1. Get article from DB
+            const articleRes = await pool.query('SELECT * FROM dashboard_articles WHERE id = $1', [id]);
+            const article = articleRes.rows[0];
+
+            if (!article) return res.status(404).json({ error: 'Article not found' });
+
+            // 2. Check Cache
+            const cachedSummary = await db.findExistingSummaryByLink(article.link);
+            if (cachedSummary) {
+                return res.json({ summary: cachedSummary, cached: true });
+            }
+
+            // 3. Generate with Gemini
+            // We need to fetch the dashboard to get the user_intent
+            const dashboard = await db.getDashboardById(article.dashboard_id);
+            const microSummary = await generateMicroSummaryTask({
+                data: { article, user_intent: dashboard.user_intent, language: 'de' }
+            });
+
+            // 4. Save to DB
+            await db.updateDashboardArticleSummary(id, microSummary);
+
+            res.json({ summary: microSummary, cached: false });
+        } catch (error) {
+            serverLogger.error(`Error summarizing article ${id}:`, error);
+            res.status(500).json({ error: 'Summarization failed' });
         }
     });
 

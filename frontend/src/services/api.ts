@@ -108,3 +108,10 @@ export async function updateDashboardSettings(id: string, settings: { summary_st
     });
     return handleResponse(response);
 }
+
+export async function summarizeArticle(articleId: string) {
+    const response = await fetchWithAuth(`${API_BASE_URL}/articles/${articleId}/summarize`, {
+        method: 'POST'
+    });
+    return handleResponse(response);
+}

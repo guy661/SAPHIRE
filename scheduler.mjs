@@ -139,13 +139,6 @@ async function pollFeedsAndMatch() {
                 if (insertedArticle) {
                     totalMatches++;
                     schedulerLogger.info(`[Live-Feed] ✨ Neuer Treffer für Dashboard "${dashboard.name}": ${match.title}`);
-                    // Queue for micro-summary generation
-                    await microSummaryQueue.add('generate-micro-summary', {
-                        dashboardArticleId: insertedArticle.id,
-                        dashboardId: dashboard.id,
-                        userIntent: dashboard.user_intent,
-                        article: match
-                    });
                 }
             }
         }
