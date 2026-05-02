@@ -32,6 +32,12 @@ async function main() {
     }
 
     const app = express();
+    
+    // Trust the proxy (Render uses a reverse proxy) to allow secure cookies
+    if (IN_PROD) {
+        app.set('trust proxy', 1);
+    }
+
     app.use(cors({
       origin: 'https://saphire-p7zs.vercel.app',
       methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -42,11 +48,11 @@ async function main() {
     app.use(session({
         name: 'sid',
         resave: false,
-        saveUninitialized: true,
+        saveUninitialized: false, // Changed to false for better security with sessions
         secret: SESS_SECRET,
         cookie: {
             maxAge: 1000 * 60 * 60 * 24, // 24 hours
-            sameSite: true,
+            sameSite: IN_PROD ? 'none' : 'lax',
             secure: IN_PROD
         }
     }));
