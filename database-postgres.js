@@ -65,16 +65,18 @@ async function updateDashboardSearchTerms(dashboardId, searchTerms) {
     return res.rows[0];
 }
 
-async function updateDashboardSettings(dashboardId, { name, summary_style, is_active }) {
+async function updateDashboardSettings(dashboardId, { name, summary_style, is_active, user_intent, user_intent_embedding }) {
     const current = await getDashboardById(dashboardId);
     const newSettings = {
         name: name !== undefined ? name : current.name,
         summary_style: summary_style !== undefined ? summary_style : current.summary_style,
         is_active: is_active !== undefined ? is_active : current.is_active,
+        user_intent: user_intent !== undefined ? user_intent : current.user_intent,
+        user_intent_embedding: user_intent_embedding !== undefined ? user_intent_embedding : current.user_intent_embedding
     };
     const res = await pool.query(
-        'UPDATE dashboards SET name = $1, summary_style = $2, is_active = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *',
-        [newSettings.name, newSettings.summary_style, newSettings.is_active, dashboardId]
+        'UPDATE dashboards SET name = $1, summary_style = $2, is_active = $3, user_intent = $4, user_intent_embedding = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
+        [newSettings.name, newSettings.summary_style, newSettings.is_active, newSettings.user_intent, newSettings.user_intent_embedding, dashboardId]
     );
     return res.rows[0];
 }

@@ -67,22 +67,27 @@ class Logger {
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // --- AI CONFIGURATION ---
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS; // Support both singular and plural (comma separated)
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_MODEL = process.env.GROQ_MODEL;
+
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
+
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS;
+
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434/v1';
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1';
 
 const aiLogger = new Logger('AI-Manager', 'magenta', EMOJIS.semantic);
 
 // Initialize Clients
+const groqClient = GROQ_API_KEY ? new OpenAI({ apiKey: GROQ_API_KEY, baseURL: 'https://api.groq.com/openai/v1' }) : null;
+const openRouterClient = OPENROUTER_API_KEY ? new OpenAI({ apiKey: OPENROUTER_API_KEY, baseURL: 'https://openrouter.ai/api/v1' }) : null;
+
 let genAI = null;
 if (GEMINI_API_KEY) {
-    // If plural, take the first one for now or handle rotation if needed. 
-    // For simplicity, we take the first available key.
     const firstKey = GEMINI_API_KEY.split(',')[0].trim();
     genAI = new GoogleGenerativeAI(firstKey);
-    aiLogger.info('Initializing Cloud AI (Google Gemini)');
-} else {
-    aiLogger.info(`Initializing Local AI (Ollama) at ${OLLAMA_BASE_URL} with model ${OLLAMA_MODEL}`);
 }
 
 const ollamaClient = new OpenAI({
@@ -90,96 +95,25 @@ const ollamaClient = new OpenAI({
     apiKey: 'ollama', 
 });
 
+if (groqClient) aiLogger.info(`Configured Groq API (Model: ${GROQ_MODEL})`);
+if (openRouterClient) aiLogger.info(`Configured OpenRouter API (Model: ${OPENROUTER_MODEL})`);
+if (genAI) aiLogger.info('Configured Gemini Cloud API');
+aiLogger.info(`Configured Ollama Local Fallback (Model: ${OLLAMA_MODEL})`);
+
+
 // --- UNIFIED AI FUNCTIONS ---
 
-/**
- * Executes a prompt against either Gemini (Cloud) or Ollama (Local).
- */
-async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
-    if (genAI) {
-        try {
-            const model = genAI.getGenerativeModel({ 
-                model: "gemini-2.5-flash",
-                generationConfig: {
-                    temperature: temperature,
-                    responseMimeType: jsonMode ? "application/json" : "text/plain",
-                }
-            });
-            const result = await model.generateContent(prompt);
-            return result.response.text();
-        } catch (error) {
-            aiLogger.error(`Gemini Cloud Error: ${error.message}`);
-            // Fallback to Ollama if Cloud fails? No, the task says "Use Cloud if key exists".
-            throw error;
-        }
-    }
-
-    try {
-        const response = await ollamaClient.chat.completions.create({
-            model: OLLAMA_MODEL,
-            messages: [{ role: 'user', content: prompt }],
-            temperature: temperature,
-            response_format: jsonMode ? { type: 'json_object' } : { type: 'text' },
-            max_tokens: 8192
-        });
-        
-        return response.choices[0].message.content;
-    } catch (error) {
-        aiLogger.error(`Ollama Local Error: ${error.message}`);
-        throw error;
-    }
-}
-
-/**
- * Executes a chat against either Gemini (Cloud) or Ollama (Local).
- */
-async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
-    if (genAI) {
-        try {
-            // 1. Extract system instruction if present
-            const systemMessage = chatHistory.find(m => m.role === 'system');
-            const systemInstruction = systemMessage ? systemMessage.parts[0].text : undefined;
-
-            // 2. Filter history to only include 'user' and 'model' (Gemini requirement)
-            // and exclude the very last message which will be sent via sendMessage
-            const filteredHistory = chatHistory
-                .filter(m => m.role === 'user' || m.role === 'model')
-                .slice(0, -1);
-
-            const model = genAI.getGenerativeModel({ 
-                model: "gemini-2.5-flash",
-                systemInstruction: systemInstruction 
-            });
-            
-            const chat = model.startChat({
-                history: filteredHistory,
-                generationConfig: {
-                    temperature: temperature,
-                },
-            });
-
-            const lastMessage = chatHistory[chatHistory.length - 1].parts[0].text;
-            const result = await chat.sendMessage(lastMessage);
-            return result.response.text();
-        } catch (error) {
-            aiLogger.error(`Gemini Cloud Chat Error: ${error.message}`);
-            throw error;
-        }
-    }
-
-    // --- OLLAMA FALLBACK ---
-    const messages = chatHistory.map(entry => {
+function geminiHistoryToOpenAI(chatHistory) {
+    return chatHistory.map(entry => {
         const content = entry.parts.map(p => p.text).join('');
         let role = 'user';
         if (entry.role === 'model') role = 'assistant';
         if (entry.role === 'system') role = 'system';
-        
-        return {
-            role: role,
-            content: content
-        };
+        return { role, content };
     });
+}
 
+function convertToolsToOpenAI(tools) {
     let openaiTools = undefined;
     if (tools && tools.length > 0) {
         openaiTools = [];
@@ -198,40 +132,141 @@ async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
             }
         });
     }
+    return openaiTools;
+}
 
-    try {
-        const response = await ollamaClient.chat.completions.create({
-            model: OLLAMA_MODEL,
-            messages: messages,
-            temperature: temperature,
-            tools: openaiTools,
-            tool_choice: openaiTools ? 'auto' : 'none'
-        });
+async function executeOpenAICall(client, model, messages, temperature, jsonMode, tools) {
+    const openaiTools = convertToolsToOpenAI(tools);
+    const response = await client.chat.completions.create({
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        response_format: jsonMode && !tools ? { type: 'json_object' } : { type: 'text' },
+        tools: openaiTools,
+        tool_choice: openaiTools ? 'auto' : undefined
+    });
 
-        const choice = response.choices[0];
-        const message = choice.message;
+    const choice = response.choices[0];
+    const message = choice.message;
 
-        if (message.tool_calls && message.tool_calls.length > 0) {
-            return message.tool_calls.map(tc => ({
-                name: tc.function.name,
-                args: JSON.parse(tc.function.arguments)
-            }));
-        }
-
-        return message.content;
-
-    } catch (error) {
-        aiLogger.error(`Ollama Chat Error: ${error.message}`);
-        throw error;
+    if (message.tool_calls && message.tool_calls.length > 0) {
+        return message.tool_calls.map(tc => ({
+            name: tc.function.name,
+            args: JSON.parse(tc.function.arguments)
+        }));
     }
+
+    return message.content;
+}
+
+async function executeGeminiCall(messages, temperature, jsonMode, tools) {
+    if (!genAI) throw new Error('Gemini not configured');
+
+    const systemMessage = messages.find(m => m.role === 'system');
+    const systemInstruction = systemMessage ? systemMessage.content : undefined;
+
+    const filteredHistory = messages
+        .filter(m => m.role === 'user' || m.role === 'assistant')
+        .map(m => ({ role: m.role === 'assistant' ? 'model' : 'user', parts: [{ text: m.content }] }));
+
+    if (filteredHistory.length === 0) throw new Error('No user messages found');
+    
+    // Extract the very last message to send
+    const lastMessage = filteredHistory.pop();
+
+    const model = genAI.getGenerativeModel({ 
+        model: "gemini-2.5-flash",
+        systemInstruction: systemInstruction,
+        generationConfig: {
+            temperature: temperature,
+            responseMimeType: jsonMode ? "application/json" : "text/plain",
+        },
+        tools: tools // Pass tools directly if they are in Gemini format
+    });
+    
+    const chat = model.startChat({ history: filteredHistory });
+    const result = await chat.sendMessage(lastMessage.parts[0].text);
+    
+    // Check for tool calls
+    const response = result.response;
+    const functionCalls = response.functionCalls();
+    if (functionCalls && functionCalls.length > 0) {
+        return functionCalls.map(fc => ({
+            name: fc.name,
+            args: fc.args
+        }));
+    }
+
+    return response.text();
+}
+
+async function callAIWithFallback(messages, temperature = 0, jsonMode = false, tools = undefined) {
+    const errors = [];
+
+    // 1. Groq
+    if (groqClient) {
+        try {
+            return await executeOpenAICall(groqClient, GROQ_MODEL, messages, temperature, jsonMode, tools);
+        } catch (err) {
+            aiLogger.warn(`Groq failed: ${err.message}. Cascading...`);
+            errors.push(`Groq: ${err.message}`);
+        }
+    }
+
+    // 2. OpenRouter
+    if (openRouterClient) {
+        try {
+            return await executeOpenAICall(openRouterClient, OPENROUTER_MODEL, messages, temperature, jsonMode, tools);
+        } catch (err) {
+            aiLogger.warn(`OpenRouter failed: ${err.message}. Cascading...`);
+            errors.push(`OpenRouter: ${err.message}`);
+        }
+    }
+
+    // 3. Gemini
+    if (genAI) {
+        try {
+            return await executeGeminiCall(messages, temperature, jsonMode, tools);
+        } catch (err) {
+            aiLogger.warn(`Gemini failed: ${err.message}. Cascading...`);
+            errors.push(`Gemini: ${err.message}`);
+        }
+    }
+
+    // 4. Ollama
+    try {
+        return await executeOpenAICall(ollamaClient, OLLAMA_MODEL, messages, temperature, jsonMode, tools);
+    } catch (err) {
+        aiLogger.error(`Ollama Local failed: ${err.message}. All strategies exhausted.`);
+        errors.push(`Ollama: ${err.message}`);
+        throw new Error(`All AI providers failed.\n${errors.join('\n')}`);
+    }
+}
+
+/**
+ * Executes a prompt (single message).
+ */
+async function callLocalAI(prompt, temperature = 0, jsonMode = false) {
+    return await callAIWithFallback([{ role: 'user', content: prompt }], temperature, jsonMode);
+}
+
+/**
+ * Executes a chat with full history.
+ */
+async function callLocalAIChat(chatHistory, tools, temperature = 0.5) {
+    const messages = geminiHistoryToOpenAI(chatHistory);
+    return await callAIWithFallback(messages, temperature, false, tools);
 }
 
 /**
  * Returns the number of available API keys.
  */
 function getApiKeyCount() {
-    if (!GEMINI_API_KEY) return 0;
-    return GEMINI_API_KEY.split(',').length;
+    let count = 0;
+    if (GROQ_API_KEY) count++;
+    if (OPENROUTER_API_KEY) count++;
+    if (GEMINI_API_KEY) count += GEMINI_API_KEY.split(',').length;
+    return count;
 }
 
 const genericLogger = new Logger('Retry', 'yellow', EMOJIS.task);

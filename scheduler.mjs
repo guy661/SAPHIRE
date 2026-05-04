@@ -125,8 +125,13 @@ async function pollFeedsAndMatch() {
 
             schedulerLogger.info(`[Live-Feed] Dashboard "${dashboard.name}": Vergleiche ${articlesToProcess.length} Kandidaten...`);
 
-            // Use pre-embedded articles for matching
-            const matchedArticles = await filterArticlesByRelevanceLocal(articlesToProcess, dashboard.user_intent, 10);
+            // Use pre-embedded articles for matching and precomputed dashboard intent embedding if available
+            const matchedArticles = await filterArticlesByRelevanceLocal(
+                articlesToProcess, 
+                dashboard.user_intent, 
+                10, 
+                dashboard.user_intent_embedding
+            );
 
             for (const match of matchedArticles) {
                 const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, null);

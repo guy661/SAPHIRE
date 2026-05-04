@@ -1,9 +1,10 @@
 import { useParams, Link as RouterLink, useNavigate, useLocation } from 'react-router-dom';
 import { Box, TextField, Button, Paper, List, ListItem, ListItemText, Typography, Container, CircularProgress } from '@mui/material';
 import { useState } from 'react';
-import { runPersonalizationChat } from '../services/api';
+import { runPersonalizationChat, updateDashboardSettings } from '../services/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useEmbedding } from '../hooks/useEmbedding';
 
 interface Message {
     sender: 'user' | 'model';
@@ -14,12 +15,15 @@ export default function ChatPage() {
     const { dashboardId } = useParams<{ dashboardId: string }>();
     const navigate = useNavigate();
     const location = useLocation();
+    const { generateEmbedding } = useEmbedding();
+    
     const [messages, setMessages] = useState<Message[]>([
         { sender: 'model', text: 'Worum soll es in diesem Dashboard gehen? Beschreiben Sie Ihr Interessensgebiet.' },
     ]);
     const [input, setInput] = useState('');
     const [isLoading, setIsLoading] = useState(false);
     const [isFinished, setIsFinished] = useState(false);
+    const [isEmbedding, setIsEmbedding] = useState(false);
 
     const handleSend = async () => {
         if (input.trim() && dashboardId && !isLoading) {
@@ -29,14 +33,28 @@ export default function ChatPage() {
             setIsLoading(true);
 
             try {
-                // Note: The backend personalization chat manages its own history via session.
-                // We send only the current message.
                 const response = await runPersonalizationChat(dashboardId, input);
                 const modelMessage: Message = { sender: 'model', text: response.message };
                 setMessages(prev => [...prev, modelMessage]);
 
                 if (response.isDone) {
                     setIsFinished(true);
+                    
+                    // --- NEW: Generate Embedding in Frontend ---
+                    if (response.user_intent) {
+                        setIsEmbedding(true);
+                        try {
+                            const embedding = await generateEmbedding(response.user_intent);
+                            await updateDashboardSettings(dashboardId, {
+                                user_intent_embedding: embedding
+                            });
+                            console.log('Embedding successfully saved to backend.');
+                        } catch (embErr) {
+                            console.error('Failed to generate/save embedding:', embErr);
+                        } finally {
+                            setIsEmbedding(false);
+                        }
+                    }
                 }
 
             } catch (error) {
@@ -96,6 +114,16 @@ export default function ChatPage() {
                         </ListItem>
                     ))}
                     {isLoading && <ListItem sx={{justifyContent: 'flex-start'}}><CircularProgress size={24} /></ListItem>}
+                    {isEmbedding && (
+                        <ListItem sx={{justifyContent: 'flex-start'}}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <CircularProgress size={16} />
+                                <Typography variant="caption" color="text.secondary">
+                                    KI-Modell wird geladen & Thema wird vektorisiert...
+                                </Typography>
+                            </Box>
+                        </ListItem>
+                    )}
                 </List>
 
                 {!isFinished ? (

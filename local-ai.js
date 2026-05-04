@@ -162,13 +162,13 @@ async function embedText(text) {
  * Sorts and filters a list of articles based on semantic similarity to the user intent.
  * Now optionally accepts pre-embedded articles.
  */
-async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) {
+async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500, precomputedIntentEmbedding = null) {
     if (!articles || articles.length === 0) return [];
 
     const totalStart = Date.now();
     
     // 1. Get Intent Embedding
-    const intentEmbedding = await embedText(userIntent);
+    const intentEmbedding = precomputedIntentEmbedding || await embedText(userIntent);
 
     // 2. Ensure articles have embeddings
     let articlesWithEmbeddings = [];

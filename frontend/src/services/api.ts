@@ -100,7 +100,13 @@ export async function getDashboardArticles(id: string) {
     return handleResponse(response);
 }
 
-export async function updateDashboardSettings(id: string, settings: { summary_style?: string, is_active?: boolean }) {
+export async function updateDashboardSettings(id: string, settings: { 
+    name?: string, 
+    summary_style?: string, 
+    is_active?: boolean, 
+    user_intent?: string, 
+    user_intent_embedding?: number[] 
+}) {
     const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },

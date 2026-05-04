@@ -216,13 +216,19 @@ async function main() {
 
     app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        const { name, summary_style, is_active } = req.body;
+        const { name, summary_style, is_active, user_intent, user_intent_embedding } = req.body;
         try {
             const dashboard = await db.getDashboardById(id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
                 return res.status(403).json({ error: "Forbidden" });
             }
-            const updatedDashboard = await db.updateDashboardSettings(id, { name, summary_style, is_active });
+            const updatedDashboard = await db.updateDashboardSettings(id, { 
+                name, 
+                summary_style, 
+                is_active, 
+                user_intent, 
+                user_intent_embedding 
+            });
             res.json(updatedDashboard);
         } catch (error) {
             serverLogger.error(`Error updating dashboard ${id}:`, error);
@@ -406,7 +412,13 @@ async function main() {
                 summaryMessage += finalKeywords.length > 0 ? `- **Google News Suchbegriffe:** ${finalKeywords.join(', ')}\n` : `- **Google News Suchbegriffe:** (Keine zusätzlichen Begriffe)\n`;
                 summaryMessage += "\nDer Live-Feed ist nun aktiv und sucht nach neuen passenden Artikeln!";
 
-                res.json({ message: summaryMessage, isDone: true, ai_categories: finalCategories, ai_keywords: finalKeywords });
+                res.json({ 
+                    message: summaryMessage, 
+                    isDone: true, 
+                    ai_categories: finalCategories, 
+                    ai_keywords: finalKeywords,
+                    user_intent: result.data.user_intent
+                });
                 delete req.session.chatHistory; 
             } else { 
                 res.status(500).json({ message: result.message });
