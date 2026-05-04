@@ -1,17 +1,8 @@
 const { pipeline } = require('@xenova/transformers');
 const { Logger, EMOJIS } = require('./utils');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
 const pLimit = require('p-limit');
 
 const aiLogger = new Logger('AI-Filter', 'cyan', EMOJIS.semantic);
-
-// API Configuration
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS;
-let genAI = null;
-if (GEMINI_API_KEY) {
-    const firstKey = GEMINI_API_KEY.split(',')[0].trim();
-    genAI = new GoogleGenerativeAI(firstKey);
-}
 
 // Strictness threshold. 
 const MIN_RELEVANCE_SCORE = 0.30; 
@@ -55,7 +46,7 @@ function cleanText(text) {
 }
 
 /**
- * Generates embeddings for a list of articles. 
+ * Generates embeddings for a list of articles using local CPU. 
  * Returns the same articles but with an added 'embedding' property.
  */
 async function embedArticles(articles) {
@@ -64,74 +55,26 @@ async function embedArticles(articles) {
     const totalStart = Date.now();
     const embeddedArticles = [];
 
-    if (genAI) {
-        aiLogger.info(`Embedding ${articles.length} articles using Cloud (Gemini)...`);
-        const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
+    const pipe = await getExtractor();
+    aiLogger.info(`Embedding ${articles.length} articles using local CPU...`);
 
-        const BATCH_SIZE = 50; // Gemini supports up to 100, but 50 is safer
-        for (let i = 0; i < articles.length; i += BATCH_SIZE) {
-            const batch = articles.slice(i, i + BATCH_SIZE);
-            const requests = batch.map(a => {
-                const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
-                const text = `Title: ${a.title}\nContent: ${cleanSnippet}`.substring(0, 1000);
-                return { content: { role: "user", parts: [{ text }] } };
-            });
+    const BATCH_SIZE = 32;
+    for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+        const batch = articles.slice(i, i + BATCH_SIZE);
+        const textsToEmbed = batch.map(a => {
+            const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
+            return `${a.title}. ${cleanSnippet}`.substring(0, 500);
+        });
 
-            try {
-                // Add a small delay between batches if we have many to avoid rapid-fire 429s
-                if (i > 0) await new Promise(resolve => setTimeout(resolve, 1000));
-
-                const batchRes = await model.batchEmbedContents({ requests });
-                
-                batchRes.embeddings.forEach((emb, index) => {
-                    embeddedArticles.push({ ...batch[index], embedding: emb.values });
-                });
-            } catch (error) {
-                aiLogger.warn(`Gemini Batch Error at index ${i}: ${error.message}. Switching to local for this batch...`);
-                
-                // Fallback for this specific failed batch
-                const pipe = await getExtractor();
-                const textsToEmbed = batch.map(a => {
-                    const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
-                    return `${a.title}. ${cleanSnippet}`.substring(0, 500);
-                });
-
-                try {
-                    const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
-                    const embeddingDim = output.dims[1];
-                    for (let j = 0; j < batch.length; j++) {
-                        const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
-                        embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
-                    }
-                } catch (localErr) {
-                    aiLogger.error(`Local fallback also failed: ${localErr.message}`);
-                    // If everything fails, we still need to keep the structure but without embedding (or skip)
-                }
+        try {
+            const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
+            const embeddingDim = output.dims[1];
+            for (let j = 0; j < batch.length; j++) {
+                const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
+                embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
             }
-        }
-    } else {
-        // Pure Local Mode
-        const pipe = await getExtractor();
-        aiLogger.info(`Embedding ${articles.length} articles using local CPU...`);
-
-        const BATCH_SIZE = 32;
-        for (let i = 0; i < articles.length; i += BATCH_SIZE) {
-            const batch = articles.slice(i, i + BATCH_SIZE);
-            const textsToEmbed = batch.map(a => {
-                const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
-                return `${a.title}. ${cleanSnippet}`.substring(0, 500);
-            });
-
-            try {
-                const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
-                const embeddingDim = output.dims[1];
-                for (let j = 0; j < batch.length; j++) {
-                    const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
-                    embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
-                }
-            } catch (e) {
-                aiLogger.error(`Local Batch error at index ${i}: ${e.message}`);
-            }
+        } catch (e) {
+            aiLogger.error(`Local Batch error at index ${i}: ${e.message}`);
         }
     }
 
@@ -140,19 +83,9 @@ async function embedArticles(articles) {
 }
 
 /**
- * Generates an embedding for a single string (intent).
+ * Generates an embedding for a single string (intent) using local CPU.
  */
 async function embedText(text) {
-    if (genAI) {
-        try {
-            const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
-            const res = await model.embedContent(text);
-            return res.embedding.values;
-        } catch (e) {
-            aiLogger.warn(`Cloud intent embedding failed, falling back to local: ${e.message}`);
-        }
-    }
-
     const pipe = await getExtractor();
     const output = await pipe(text, { pooling: 'mean', normalize: true });
     return Array.from(output.data);
