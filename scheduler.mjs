@@ -4,11 +4,9 @@ import { filterArticlesByRelevanceLocal, embedArticles } from './local-ai.js';
 import { Logger, EMOJIS } from './utils.js';
 import fetch from 'node-fetch';
 import Parser from 'rss-parser';
-import queues from './queues.mjs';
 
 const schedulerLogger = new Logger('Scheduler', 'yellow', EMOJIS.scheduler);
 const parser = new Parser();
-const { microSummaryQueue } = queues;
 
 const CHECK_INTERVAL_MS = 5 * 60 * 1000; // Check every 5 minutes
 

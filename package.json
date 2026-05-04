@@ -6,10 +6,9 @@
   "scripts": {
     "test": "vitest",
     "server": "node server.js",
-    "worker": "node workers/index.mjs",
     "scheduler": "node scheduler.mjs",
     "migrate": "node run-migrate.js",
-    "start": "npm run migrate up && concurrently \"npm run server\" \"npm run worker\" \"npm run scheduler\""
+    "start": "npm run migrate up && concurrently \"npm run server\" \"npm run scheduler\""
   },
   "keywords": [],
   "author": "",
@@ -21,14 +20,12 @@
     "@xenova/transformers": "^2.17.2",
     "axios": "^1.13.2",
     "bcrypt": "^6.0.0",
-    "bullmq": "^5.64.1",
     "cheerio": "^1.1.2",
     "concurrently": "^9.2.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "express-session": "^1.18.2",
-    "ioredis": "^5.8.2",
     "jsdom": "^27.2.0",
     "node-fetch": "^2.7.0",
     "node-pg-migrate": "^8.0.3",

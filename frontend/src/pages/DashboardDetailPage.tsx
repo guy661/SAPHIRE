@@ -254,13 +254,6 @@ export default function DashboardDetailPage() {
                                             )}
                                         </Box>
                                     )}
-                                        <Box display="flex" alignItems="center" gap={1} mt={2}>
-                                            <CircularProgress size={16} />
-                                            <Typography variant="caption" color="text.secondary">
-                                                Generiere Zusammenfassung...
-                                            </Typography>
-                                        </Box>
-                                    )}
                                     
                                     <Box display="flex" justifyContent="flex-end" mt={2}>
                                         <Chip 

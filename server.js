@@ -19,12 +19,6 @@ const SESS_SECRET = process.env.SESS_SECRET || 'your-default-secret';
 const IN_PROD = process.env.NODE_ENV === 'production';
 
 async function main() {
-    const queuesModule = await import('./queues.mjs');
-    const { microSummaryQueue } = queuesModule.default;
-
-    if (!microSummaryQueue) throw new Error('microSummaryQueue is undefined!');
-    serverLogger.info('Queues initialized.');
-
     const { getApiKeyCount } = require('./utils.js');
     if (getApiKeyCount() === 0 || !process.env.SESS_SECRET) {
         serverLogger.error("Missing GEMINI_API_KEYS or SESS_SECRET in the .env file.");
@@ -33,18 +27,13 @@ async function main() {
 
     const app = express();
     
-    // Trust the proxy (Render uses a reverse proxy) to allow secure cookies
-    if (IN_PROD) {
-        app.set('trust proxy', 1);
-    }
+    // Always trust proxy on Render for secure cookies to work cross-domain
+    app.set('trust proxy', 1);
 
     const allowedOrigins = ['http://localhost:5173', 'http://localhost:3000', 'https://saphire-p7zs.vercel.app'];
     app.use(cors({
         origin: function (origin, callback) {
-            // Allow requests with no origin (like mobile apps or curl requests)
             if (!origin) return callback(null, true);
-            
-            // Allow specified origins or any Vercel preview branch
             if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
                 callback(null, true);
             } else {
@@ -59,12 +48,12 @@ async function main() {
     app.use(session({
         name: 'sid',
         resave: false,
-        saveUninitialized: false, // Changed to false for better security with sessions
+        saveUninitialized: false,
         secret: SESS_SECRET,
         cookie: {
             maxAge: 1000 * 60 * 60 * 24, // 24 hours
-            sameSite: IN_PROD ? 'none' : 'lax',
-            secure: IN_PROD
+            sameSite: 'none', // Must be none for cross-domain (Render API <-> Vercel UI)
+            secure: true      // Must be true for sameSite: 'none'
         }
     }));
 
@@ -205,23 +194,6 @@ async function main() {
         } catch (error) {
             serverLogger.error(`Error fetching dashboard ${id} for user ${req.session.userId}:`, error);
             res.status(500).json({ error: 'Failed to fetch dashboard' });
-        }
-    });
-
-    app.get('/api/dashboards/:id/jobs', isAuthenticated, async (req, res) => {
-        const { id } = req.params;
-        try {
-            // First, verify the dashboard belongs to the user
-            const dashboard = await db.getDashboardById(parseInt(id, 10));
-            if (!dashboard || dashboard.user_id !== req.session.userId) {
-                return res.status(404).json({ error: "Dashboard not found or access denied" });
-            }
-            // If authorized, fetch the jobs
-            const jobs = await db.getJobsByDashboardId(id);
-            res.json(jobs);
-        } catch (error) {
-            serverLogger.error(`Error fetching jobs for dashboard ${id}:`, error);
-            res.status(500).json({ error: 'Failed to fetch jobs' });
         }
     });
 
