@@ -38,10 +38,21 @@ async function main() {
         app.set('trust proxy', 1);
     }
 
+    const allowedOrigins = ['http://localhost:5173', 'http://localhost:3000', 'https://saphire-p7zs.vercel.app'];
     app.use(cors({
-      origin: 'https://saphire-p7zs.vercel.app',
-      methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-      credentials: true
+        origin: function (origin, callback) {
+            // Allow requests with no origin (like mobile apps or curl requests)
+            if (!origin) return callback(null, true);
+            
+            // Allow specified origins or any Vercel preview branch
+            if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+                callback(null, true);
+            } else {
+                callback(new Error('Not allowed by CORS'));
+            }
+        },
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        credentials: true
     }));
     app.use(express.json());
 
