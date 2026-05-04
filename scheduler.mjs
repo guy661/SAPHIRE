@@ -1,6 +1,6 @@
 import * as db from './database-postgres.js';
 import { getAggregatedFeed } from './rss-aggregator.js';
-import { filterArticlesByRelevanceLocal } from './local-ai.js';
+import { filterArticlesByRelevanceLocal, embedArticles } from './local-ai.js';
 import { Logger, EMOJIS } from './utils.js';
 import fetch from 'node-fetch';
 import Parser from 'rss-parser';
@@ -19,7 +19,6 @@ async function pollFeedsAndMatch() {
     try {
         const dashboards = await db.getAllActiveDashboards();
         if (dashboards.length === 0) {
-            // Only log this occasionally, or keep it quiet to avoid log spam
             return;
         }
 
@@ -46,7 +45,7 @@ async function pollFeedsAndMatch() {
         }
         
         if (allCategories.size === 0 && allSearchTerms.size === 0) {
-            return; // Nothing to search for yet
+            return;
         }
 
         schedulerLogger.info(`[Live-Feed] Suche nach neuen Artikeln für ${dashboards.length} aktive(s) Dashboard(s)...`);
@@ -84,21 +83,16 @@ async function pollFeedsAndMatch() {
         const allFetchedArticles = [...customArticles, ...Array.from(googleArticlesMap.values())];
         
         // Filter out URLs we've recently seen in this session to save AI CPU time
-        // Add a minimum length filter to avoid paywall stubs or empty articles (min 100 chars)
         const newArticles = allFetchedArticles.filter(a => {
             if (!a || !a.link || recentArticlesCache.has(a.link)) return false;
-            
             const content = a.contentSnippet || a.content || a.snippet || '';
-            // Paywall/Stub-Filter: Verwerfe Artikel mit fast keinem Inhalt
             if (content.trim().length < 100) return false;
-
             return true;
         });
         
         // Update cache
         newArticles.forEach(a => recentArticlesCache.add(a.link));
         if (recentArticlesCache.size > 10000) {
-            // Keep cache size manageable
             const urlsToRemove = Array.from(recentArticlesCache).slice(0, 2000);
             urlsToRemove.forEach(url => recentArticlesCache.delete(url));
         }
@@ -108,17 +102,19 @@ async function pollFeedsAndMatch() {
              return;
         }
 
-        schedulerLogger.info(`[Live-Feed] ${newArticles.length} neue rohe Artikel gefunden. Starte KI-Relevanzprüfung...`);
+        schedulerLogger.info(`[Live-Feed] ${newArticles.length} neue rohe Artikel gefunden. Starte KI-Einbettung...`);
 
-        // 4. Match against each dashboard
+        // --- EFFICIENCY FIX: Embed all unique articles ONCE ---
+        const embeddedArticles = await embedArticles(newArticles);
+
+        // 4. Match against each dashboard using pre-computed embeddings
         let totalMatches = 0;
         for (const dashboard of dashboards) {
             if (!dashboard.user_intent) continue;
 
-            // --- OPTIMIZATION: Check DB before AI ---
             // Only process articles that aren't already in this specific dashboard
             const articlesToProcess = [];
-            for (const a of newArticles) {
+            for (const a of embeddedArticles) {
                 const alreadyInDb = await db.isArticleAlreadyInDashboard(dashboard.id, a.link);
                 if (!alreadyInDb) {
                     articlesToProcess.push(a);
@@ -127,15 +123,13 @@ async function pollFeedsAndMatch() {
 
             if (articlesToProcess.length === 0) continue;
 
-            schedulerLogger.info(`[Live-Feed] Dashboard "${dashboard.name}": Prüfe ${articlesToProcess.length} neue Kandidaten mit KI...`);
+            schedulerLogger.info(`[Live-Feed] Dashboard "${dashboard.name}": Vergleiche ${articlesToProcess.length} Kandidaten...`);
 
-            // Use Local AI to filter new articles against this dashboard's intent
-            const matchedArticles = await filterArticlesByRelevanceLocal(articlesToProcess, dashboard.user_intent, 10); // Top 10 max per cycle
+            // Use pre-embedded articles for matching
+            const matchedArticles = await filterArticlesByRelevanceLocal(articlesToProcess, dashboard.user_intent, 10);
 
             for (const match of matchedArticles) {
-                // Try to insert into the database (will handle title-based dedup and link-based dedup)
                 const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, null);
-                
                 if (insertedArticle) {
                     totalMatches++;
                     schedulerLogger.info(`[Live-Feed] ✨ Neuer Treffer für Dashboard "${dashboard.name}": ${match.title}`);

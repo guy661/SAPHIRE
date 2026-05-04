@@ -55,62 +55,64 @@ function cleanText(text) {
 }
 
 /**
- * Sorts and filters a list of articles based on semantic similarity to the user intent.
+ * Generates embeddings for a list of articles. 
+ * Returns the same articles but with an added 'embedding' property.
  */
-async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) {
+async function embedArticles(articles) {
     if (!articles || articles.length === 0) return [];
 
     const totalStart = Date.now();
-    let intentEmbedding;
-    let scoredArticles = [];
+    const embeddedArticles = [];
 
     if (genAI) {
-        // --- CLOUD EMBEDDINGS (GEMINI) ---
-        aiLogger.info(`Using Cloud Embeddings (Gemini) for ${articles.length} articles...`);
+        aiLogger.info(`Embedding ${articles.length} articles using Cloud (Gemini)...`);
         const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
 
-        try {
-            // 1. Embed Intent
-            const intentRes = await model.embedContent(userIntent);
-            intentEmbedding = intentRes.embedding.values;
+        const BATCH_SIZE = 50; // Gemini supports up to 100, but 50 is safer
+        for (let i = 0; i < articles.length; i += BATCH_SIZE) {
+            const batch = articles.slice(i, i + BATCH_SIZE);
+            const requests = batch.map(a => {
+                const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
+                const text = `Title: ${a.title}\nContent: ${cleanSnippet}`.substring(0, 1000);
+                return { content: { role: "user", parts: [{ text }] } };
+            });
 
-            // 2. Embed Articles in Batches (Gemini supports batching)
-            const BATCH_SIZE = 20; // Reduced batch size for finer control
-            for (let i = 0; i < articles.length; i += BATCH_SIZE) {
-                // Add a small delay between batches to stay under rate limits (e.g. 2 seconds)
-                if (i > 0) {
-                    await new Promise(resolve => setTimeout(resolve, 2000));
-                }
+            try {
+                // Add a small delay between batches if we have many to avoid rapid-fire 429s
+                if (i > 0) await new Promise(resolve => setTimeout(resolve, 1000));
 
-                const batch = articles.slice(i, i + BATCH_SIZE);
-                const texts = batch.map(a => {
-                    const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
-                    return `Title: ${a.title}\nContent: ${cleanSnippet}`.substring(0, 1000);
-                });
-
-                const batchRes = await model.batchEmbedContents({
-                    requests: texts.map(t => ({ content: { role: "user", parts: [{ text: t }] } }))
-                });
-
+                const batchRes = await model.batchEmbedContents({ requests });
+                
                 batchRes.embeddings.forEach((emb, index) => {
-                    const score = cosineSimilarity(intentEmbedding, emb.values);
-                    scoredArticles.push({ ...batch[index], relevanceScore: score });
+                    embeddedArticles.push({ ...batch[index], embedding: emb.values });
                 });
-            }
-        } catch (error) {
-            aiLogger.error(`Cloud Embedding Error: ${error.message}. Falling back to local if possible...`);
-            // If cloud fails, we don't return, we try to let it fall through to local or fail gracefully
-            if (!extractor && !GEMINI_API_KEY) throw error; 
-        }
-    } 
-    
-    // --- LOCAL FALLBACK (XENOVA) ---
-    if (scoredArticles.length === 0) {
-        const pipe = await getExtractor();
-        aiLogger.info(`Calculating semantic scores for ${articles.length} candidates using local CPU...`);
+            } catch (error) {
+                aiLogger.warn(`Gemini Batch Error at index ${i}: ${error.message}. Switching to local for this batch...`);
+                
+                // Fallback for this specific failed batch
+                const pipe = await getExtractor();
+                const textsToEmbed = batch.map(a => {
+                    const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
+                    return `${a.title}. ${cleanSnippet}`.substring(0, 500);
+                });
 
-        const intentOutput = await pipe(userIntent, { pooling: 'mean', normalize: true });
-        intentEmbedding = intentOutput.data;
+                try {
+                    const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
+                    const embeddingDim = output.dims[1];
+                    for (let j = 0; j < batch.length; j++) {
+                        const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
+                        embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
+                    }
+                } catch (localErr) {
+                    aiLogger.error(`Local fallback also failed: ${localErr.message}`);
+                    // If everything fails, we still need to keep the structure but without embedding (or skip)
+                }
+            }
+        }
+    } else {
+        // Pure Local Mode
+        const pipe = await getExtractor();
+        aiLogger.info(`Embedding ${articles.length} articles using local CPU...`);
 
         const BATCH_SIZE = 32;
         for (let i = 0; i < articles.length; i += BATCH_SIZE) {
@@ -125,16 +127,65 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
                 const embeddingDim = output.dims[1];
                 for (let j = 0; j < batch.length; j++) {
                     const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
-                    const score = cosineSimilarity(intentEmbedding, embedding);
-                    scoredArticles.push({ ...batch[j], relevanceScore: score });
+                    embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
                 }
             } catch (e) {
-                aiLogger.error(`Local Batch error: ${e.message}`);
+                aiLogger.error(`Local Batch error at index ${i}: ${e.message}`);
             }
         }
     }
 
-    // 3. Strict Filtering & Sorting
+    aiLogger.info(`Embedding Done for ${embeddedArticles.length} articles. Time: ${(Date.now() - totalStart) / 1000}s`);
+    return embeddedArticles;
+}
+
+/**
+ * Generates an embedding for a single string (intent).
+ */
+async function embedText(text) {
+    if (genAI) {
+        try {
+            const model = genAI.getGenerativeModel({ model: "gemini-embedding-2" });
+            const res = await model.embedContent(text);
+            return res.embedding.values;
+        } catch (e) {
+            aiLogger.warn(`Cloud intent embedding failed, falling back to local: ${e.message}`);
+        }
+    }
+
+    const pipe = await getExtractor();
+    const output = await pipe(text, { pooling: 'mean', normalize: true });
+    return Array.from(output.data);
+}
+
+/**
+ * Sorts and filters a list of articles based on semantic similarity to the user intent.
+ * Now optionally accepts pre-embedded articles.
+ */
+async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) {
+    if (!articles || articles.length === 0) return [];
+
+    const totalStart = Date.now();
+    
+    // 1. Get Intent Embedding
+    const intentEmbedding = await embedText(userIntent);
+
+    // 2. Ensure articles have embeddings
+    let articlesWithEmbeddings = [];
+    if (articles[0] && articles[0].embedding) {
+        articlesWithEmbeddings = articles;
+    } else {
+        articlesWithEmbeddings = await embedArticles(articles);
+    }
+
+    // 3. Score
+    const scoredArticles = articlesWithEmbeddings.map(a => {
+        if (!a.embedding) return { ...a, relevanceScore: 0 };
+        const score = cosineSimilarity(intentEmbedding, a.embedding);
+        return { ...a, relevanceScore: score };
+    });
+
+    // 4. Strict Filtering & Sorting
     const keptArticles = scoredArticles
         .filter(a => a.relevanceScore >= MIN_RELEVANCE_SCORE)
         .sort((a, b) => b.relevanceScore - a.relevanceScore);
@@ -145,16 +196,11 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500) 
 
     if (keptArticles.length > 0) {
         const highest = keptArticles[0];
-        aiLogger.info(`[Score Stats] Highest: "${highest.title}" (${highest.relevanceScore.toFixed(4)})`);
+        aiLogger.info(`[Intent Match] Highest: "${highest.title}" (${highest.relevanceScore.toFixed(4)})`);
     }
 
-    if (discardedArticles.length > 0) {
-        const bestLoser = discardedArticles[0];
-        aiLogger.info(`[Discarded Debug] Best rejected: [${bestLoser.relevanceScore.toFixed(4)}] ${bestLoser.title}`);
-    }
-
-    aiLogger.info(`AI Filter Done: Kept ${keptArticles.length}/${articles.length}. Time: ${(Date.now() - totalStart) / 1000}s`);
+    aiLogger.info(`Relevance Check Done: Kept ${keptArticles.length}/${articles.length}.`);
     return keptArticles.slice(0, topK);
 }
 
-module.exports = { filterArticlesByRelevanceLocal };
+module.exports = { filterArticlesByRelevanceLocal, embedArticles, embedText };
