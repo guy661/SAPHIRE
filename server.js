@@ -30,18 +30,16 @@ async function main() {
     // Always trust proxy on Render for secure cookies to work cross-domain
     app.set('trust proxy', 1);
 
-    const allowedOrigins = ['http://localhost:5173', 'http://localhost:3000', 'https://saphire-p7zs.vercel.app'];
     app.use(cors({
         origin: function (origin, callback) {
+            // Allow any origin that matches our expected domains
             if (!origin) return callback(null, true);
-            if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
-                callback(null, true);
-            } else {
-                callback(new Error('Not allowed by CORS'));
-            }
+            const isAllowed = origin.includes('localhost') || origin.includes('vercel.app');
+            callback(null, isAllowed ? origin : false);
         },
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        credentials: true
+        credentials: true,
+        optionsSuccessStatus: 200 // Some legacy browsers and proxies choke on 204
     }));
     app.use(express.json());
 
