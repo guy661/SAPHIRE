@@ -11,7 +11,7 @@ const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
 const { Logger, EMOJIS } = require('./utils.js');
-const { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask } = require('./task.js');
+const { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateMicroSummaryTask } = require('./task.js');
 
 const serverLogger = new Logger('Server', 'green', EMOJIS.server);
 
