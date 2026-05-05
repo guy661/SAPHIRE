@@ -1,27 +1,14 @@
-const { pipeline } = require('@xenova/transformers');
-const { Logger, EMOJIS } = require('./utils');
-const pLimit = require('p-limit');
+const { genAI, Logger, EMOJIS } = require('./utils');
 
 const aiLogger = new Logger('AI-Filter', 'cyan', EMOJIS.semantic);
 
 // Strictness threshold. 
 const MIN_RELEVANCE_SCORE = 0.30; 
 
-// Cache the local model globally if needed
-let extractor = null;
-
-async function getExtractor() {
-    if (!extractor) {
-        aiLogger.info('Loading local embedding model (Xenova/paraphrase-multilingual-MiniLM-L12-v2)...');
-        extractor = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
-            quantized: true,
-        });
-        aiLogger.info('Local multilingual model loaded successfully.');
-    }
-    return extractor;
-}
-
-// Helper to compute cosine similarity
+/**
+ * Helper to compute cosine similarity (still needed for comparison, 
+ * although Gemini embeddings are typically normalized).
+ */
 function cosineSimilarity(vecA, vecB) {
     let dotProduct = 0;
     let magnitudeA = 0;
@@ -46,35 +33,50 @@ function cleanText(text) {
 }
 
 /**
- * Generates embeddings for a list of articles using local CPU. 
- * Returns the same articles but with an added 'embedding' property.
+ * Generates embeddings using Gemini API (text-embedding-004).
+ */
+async function embedText(text) {
+    if (!genAI) throw new Error('Gemini API not configured for embeddings');
+    
+    try {
+        const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
+        const result = await model.embedContent(text.substring(0, 8000)); // Gemini limit is high, but let's be safe
+        return result.embedding.values;
+    } catch (e) {
+        aiLogger.error(`Gemini Embedding error: ${e.message}`);
+        throw e;
+    }
+}
+
+/**
+ * Generates embeddings for multiple articles using Gemini API.
  */
 async function embedArticles(articles) {
     if (!articles || articles.length === 0) return [];
+    if (!genAI) throw new Error('Gemini API not configured for embeddings');
 
     const totalStart = Date.now();
     const embeddedArticles = [];
+    const model = genAI.getGenerativeModel({ model: "text-embedding-004" });
 
-    const pipe = await getExtractor();
-    aiLogger.info(`Embedding ${articles.length} articles using local CPU...`);
+    aiLogger.info(`Embedding ${articles.length} articles using Gemini API...`);
 
-    const BATCH_SIZE = 32;
+    // Gemini supports batch embedding
+    const BATCH_SIZE = 100; 
     for (let i = 0; i < articles.length; i += BATCH_SIZE) {
         const batch = articles.slice(i, i + BATCH_SIZE);
-        const textsToEmbed = batch.map(a => {
+        const requests = batch.map(a => {
             const cleanSnippet = cleanText(a.contentSnippet || a.snippet || '');
-            return `${a.title}. ${cleanSnippet}`.substring(0, 500);
+            return { content: { parts: [{ text: `${a.title}. ${cleanSnippet}`.substring(0, 1000) }] } };
         });
 
         try {
-            const output = await pipe(textsToEmbed, { pooling: 'mean', normalize: true });
-            const embeddingDim = output.dims[1];
-            for (let j = 0; j < batch.length; j++) {
-                const embedding = output.data.subarray(j * embeddingDim, (j + 1) * embeddingDim);
-                embeddedArticles.push({ ...batch[j], embedding: Array.from(embedding) });
-            }
+            const result = await model.batchEmbedContents({ requests });
+            result.embeddings.forEach((emb, index) => {
+                embeddedArticles.push({ ...batch[index], embedding: emb.values });
+            });
         } catch (e) {
-            aiLogger.error(`Local Batch error at index ${i}: ${e.message}`);
+            aiLogger.error(`Gemini Batch Embedding error at index ${i}: ${e.message}`);
         }
     }
 
@@ -83,17 +85,7 @@ async function embedArticles(articles) {
 }
 
 /**
- * Generates an embedding for a single string (intent) using local CPU.
- */
-async function embedText(text) {
-    const pipe = await getExtractor();
-    const output = await pipe(text, { pooling: 'mean', normalize: true });
-    return Array.from(output.data);
-}
-
-/**
- * Sorts and filters a list of articles based on semantic similarity to the user intent.
- * Now optionally accepts pre-embedded articles.
+ * Sorts and filters a list of articles based on semantic similarity using Gemini Embeddings.
  */
 async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500, precomputedIntentEmbedding = null) {
     if (!articles || articles.length === 0) return [];
@@ -121,10 +113,6 @@ async function filterArticlesByRelevanceLocal(articles, userIntent, topK = 500, 
     // 4. Strict Filtering & Sorting
     const keptArticles = scoredArticles
         .filter(a => a.relevanceScore >= MIN_RELEVANCE_SCORE)
-        .sort((a, b) => b.relevanceScore - a.relevanceScore);
-
-    const discardedArticles = scoredArticles
-        .filter(a => a.relevanceScore < MIN_RELEVANCE_SCORE)
         .sort((a, b) => b.relevanceScore - a.relevanceScore);
 
     if (keptArticles.length > 0) {

@@ -75,9 +75,6 @@ const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL;
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEYS;
 
-const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434/v1';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.1';
-
 const aiLogger = new Logger('AI-Manager', 'magenta', EMOJIS.semantic);
 
 // Initialize Clients
@@ -90,15 +87,9 @@ if (GEMINI_API_KEY) {
     genAI = new GoogleGenerativeAI(firstKey);
 }
 
-const ollamaClient = new OpenAI({
-    baseURL: OLLAMA_BASE_URL,
-    apiKey: 'ollama', 
-});
-
 if (groqClient) aiLogger.info(`Configured Groq API (Model: ${GROQ_MODEL})`);
 if (openRouterClient) aiLogger.info(`Configured OpenRouter API (Model: ${OPENROUTER_MODEL})`);
 if (genAI) aiLogger.info('Configured Gemini Cloud API');
-aiLogger.info(`Configured Ollama Local Fallback (Model: ${OLLAMA_MODEL})`);
 
 
 // --- UNIFIED AI FUNCTIONS ---
@@ -233,14 +224,7 @@ async function callAIWithFallback(messages, temperature = 0, jsonMode = false, t
         }
     }
 
-    // 4. Ollama
-    try {
-        return await executeOpenAICall(ollamaClient, OLLAMA_MODEL, messages, temperature, jsonMode, tools);
-    } catch (err) {
-        aiLogger.error(`Ollama Local failed: ${err.message}. All strategies exhausted.`);
-        errors.push(`Ollama: ${err.message}`);
-        throw new Error(`All AI providers failed.\n${errors.join('\n')}`);
-    }
+    throw new Error(`All AI providers failed.\n${errors.join('\n')}`);
 }
 
 /**
@@ -286,4 +270,4 @@ async function retry(fn, maxRetries = 3, delay = 1000, finalErr = 'Retry failed'
     throw finalError;
 }
 
-module.exports = { getApiKeyCount, callLocalAI, callLocalAIChat, retry, Logger, EMOJIS };
+module.exports = { getApiKeyCount, callLocalAI, callLocalAIChat, retry, Logger, EMOJIS, genAI };

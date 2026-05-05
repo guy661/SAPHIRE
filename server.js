@@ -19,7 +19,10 @@ const SESS_SECRET = process.env.SESS_SECRET || 'your-default-secret';
 const IN_PROD = process.env.NODE_ENV === 'production';
 
 async function main() {
+    serverLogger.info(`Starting server... NODE_ENV: ${process.env.NODE_ENV}, IN_PROD: ${IN_PROD}`);
+    
     const { getApiKeyCount } = require('./utils.js');
+    serverLogger.info(`API Keys found: ${getApiKeyCount()}`);
     if (getApiKeyCount() === 0 || !process.env.SESS_SECRET) {
         serverLogger.error("Missing GEMINI_API_KEYS or SESS_SECRET in the .env file.");
         process.exit(1);

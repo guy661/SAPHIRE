@@ -5,11 +5,6 @@ const { Logger, EMOJIS } = require('./utils');
 const axios = require('axios');
 const pLimit = require('p-limit');
 
-// Puppeteer imports for fallback
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-puppeteer.use(StealthPlugin());
-
 const parser = new Parser({
   headers: {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
@@ -41,44 +36,6 @@ async function getFeedCategories() {
     feedCategories = JSON.parse(data);
   }
   return feedCategories;
-}
-
-// Fallback function using Puppeteer
-async function fetchFeedWithPuppeteer(url) {
-  aggregatorLogger.warn(`Initiating Stealth Puppeteer fallback for: ${url}`);
-  let browser = null;
-  try {
-    browser = await puppeteer.launch({
-      headless: "new",
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'] 
-    });
-    const page = await browser.newPage();
-    
-    // Set a realistic viewport and user agent
-    await page.setViewport({ width: 1366, height: 768 });
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
-
-    // Go to URL and wait for body
-    const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Get the raw text content. 
-    // Sometimes Chrome wraps XML in a visual tree (inside <body>), sometimes it's raw text.
-    // We try to get the raw response text first if available from the network response.
-    let content = await response.text();
-
-    if (!content || content.length < 50) {
-        // If response text is empty (some SPAs?), try evaluating body text
-        content = await page.evaluate(() => document.body.innerText);
-    }
-    
-    return content;
-
-  } catch (err) {
-    aggregatorLogger.error(`Puppeteer fallback failed for ${url}: ${err.message}`);
-    throw err;
-  } finally {
-    if (browser) await browser.close();
-  }
 }
 
 async function fetchGoogleNewsForSite(siteUrl, lang, originalName) {
@@ -155,26 +112,12 @@ async function fetchAndParseFeed(feedConfig) {
     rawContent = response.data;
 
   } catch (error) {
-    const isBlockingError = error.message.includes('403') || error.message.includes('401') || error.message.includes('429') || error.message.includes('503');
-    
-    if (isBlockingError) {
-        try {
-            // 2. Fallback to Puppeteer
-            rawContent = await fetchFeedWithPuppeteer(url);
-        } catch (puppeteerError) {
-             aggregatorLogger.warn(`Both Axios and Puppeteer failed for ${name} (${url}).`);
-             // Even if main feed fails, we might still try Google Booster if we can guess the domain from the feed URL?
-             // For now, let's just return empty to be safe, or we could try parsing the feed URL itself.
-        }
+    if (error.code === 'ENOTFOUND') {
+        aggregatorLogger.warn(`DNS Error for ${url}: Host not found.`);
+    } else if (error.response && error.response.status === 404) {
+        aggregatorLogger.warn(`Feed not found (404): ${url}`);
     } else {
-        // Standard errors (DNS, 404) - Log and return empty
-        if (error.code === 'ENOTFOUND') {
-            aggregatorLogger.warn(`DNS Error for ${url}: Host not found.`);
-        } else if (error.response && error.response.status === 404) {
-            aggregatorLogger.warn(`Feed not found (404): ${url}`);
-        } else {
-            aggregatorLogger.warn(`Error processing feed ${name}: ${error.message}`);
-        }
+        aggregatorLogger.warn(`Error processing feed ${name}: ${error.message}`);
     }
   }
 
@@ -277,7 +220,7 @@ async function getAggregatedFeed(categories = [], minDate = null, keywords = {})
     return [];
   }
 
-  // Limit concurrency to 5 parallel fetches to prevent killing the server with Puppeteer instances
+  // Limit concurrency to 5 parallel fetches to prevent overloading the server
   const limit = pLimit(5);
 
   const feedPromises = feedsToFetch.map(feed => limit(() => fetchAndParseFeed(feed).then(items => {
