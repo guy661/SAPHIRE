@@ -187,23 +187,32 @@ Wähle NUR Kategorien, die **exakt** zum Interest passen.
     }
 };
 
-const generateGeneralKeywordsTask = async ({ data: { user_intent, language = 'de' } }) => {
+const generateHighPrecisionKeywordsTask = async ({ data: { user_intent, language = 'de' } }) => {
     const prompt = `
-### ROLE
-Such-Experte.
+### ROLLE
+Du bist ein Experte für semantische Suche und Informations-Retrieval.
 
 ### INPUT
-Intent: "${user_intent}"
+User-Interesse: "${user_intent}"
 
-### TASK
-Generiere 5-8 breite Keywords (max 2 Wörter) als Vorfilter.
-- Deutsch (de) UND Englisch (en).
-- Breit genug für alle Aspekte ("US-Wahl" statt "Wahlergebnis Pennsylvania").
+### AUFGABE
+Generiere eine Liste von Keywords, die ein Embedding-Modell ersetzen können. 
+Die Liste muss so umfassend sein, dass sie auch Artikel findet, die das Hauptwort nicht enthalten, aber semantisch relevant sind.
+
+Generiere Begriffe in folgenden Kategorien:
+1. **Synonyme & Verwandte Konzepte** (z.B. "Auto" -> "Fahrzeug", "Mobilität")
+2. **Unterbegriffe & Spezifikationen** (z.B. "KI" -> "LLM", "Neuronale Netze", "Machine Learning")
+3. **Wichtige Entitäten** (Firmen, Personen, Orte, die typischerweise vorkommen)
+4. **Englische Fachbegriffe** (da viele Feeds gemischt sind)
+
+### REGELN
+- Max. 20-25 Begriffe insgesamt.
+- Keine zu allgemeinen Wörter (nicht "News", "Artikel").
+- Nur die Begriffe als JSON-Array zurückgeben.
 
 ### OUTPUT FORMAT (JSON ONLY)
 {
-  "de": ["Begriff1", "Begriff2"],
-  "en": ["Term1", "Term2"]
+  "keywords": ["Begriff1", "Begriff2", "Term1", "Term2", ...]
 }
     `;
 
@@ -211,19 +220,19 @@ Generiere 5-8 breite Keywords (max 2 Wörter) als Vorfilter.
         const responseString = await callLocalAI(prompt, 0.3, true);
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error("No JSON found");
-        
+
         const result = JSON.parse(jsonMatch[0]);
-        return {
-            de: Array.isArray(result.de) ? result.de : [],
-            en: Array.isArray(result.en) ? result.en : []
-        };
+        return Array.isArray(result.keywords) ? result.keywords : [];
     } catch (error) {
-        taskLogger.error('Error generating general keywords', error);
-        return { de: [], en: [] };
+        taskLogger.error('Error generating high precision keywords', error);
+        return [user_intent]; 
     }
 };
 
-const generateMicroSummaryTask = async ({ data: { article, user_intent, language = 'de' } }) => {
+// Aliasing for backward compatibility in server.js
+const generateGeneralKeywordsTask = generateHighPrecisionKeywordsTask;
+
+module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateHighPrecisionKeywordsTask, generateMicroSummaryTask };
     const prompt = `
 ### ROLLE
 Du bist ein präziser News-Kurator.
