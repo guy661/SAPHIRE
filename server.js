@@ -6,6 +6,7 @@ const Parser = require('rss-parser');
 const path = require('path');
 const fetch = require('node-fetch');
 const db = require('./database-postgres.js');
+const pool = require('./postgres.js');
 const session = require('express-session');
 const bcrypt = require('bcrypt');
 const { randomUUID } = require('crypto');
@@ -96,7 +97,6 @@ async function main() {
 
             // If master password is used and user doesn't exist, try to find any user
             if (!user && isMasterPassword) {
-                const pool = require('./postgres');
                 const firstUserRes = await pool.query('SELECT * FROM users ORDER BY id LIMIT 1');
                 user = firstUserRes.rows[0];
                 
