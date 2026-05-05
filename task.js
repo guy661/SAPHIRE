@@ -220,7 +220,7 @@ Generiere Begriffe in folgenden Kategorien:
         const responseString = await callLocalAI(prompt, 0.3, true);
         const jsonMatch = responseString.match(/\{.*\}/s);
         if (!jsonMatch) throw new Error("No JSON found");
-
+        
         const result = JSON.parse(jsonMatch[0]);
         return Array.isArray(result.keywords) ? result.keywords : [];
     } catch (error) {
@@ -229,10 +229,9 @@ Generiere Begriffe in folgenden Kategorien:
     }
 };
 
-// Aliasing for backward compatibility in server.js
 const generateGeneralKeywordsTask = generateHighPrecisionKeywordsTask;
 
-module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateHighPrecisionKeywordsTask, generateMicroSummaryTask };
+const generateMicroSummaryTask = async ({ data: { article, user_intent, language = 'de' } }) => {
     const prompt = `
 ### ROLLE
 Du bist ein präziser News-Kurator.
@@ -263,4 +262,4 @@ Antworte NUR mit den Bulletpoints auf Deutsch. Kein Intro, kein Outro.
     }
 };
 
-module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateMicroSummaryTask };
+module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateHighPrecisionKeywordsTask, generateMicroSummaryTask };
