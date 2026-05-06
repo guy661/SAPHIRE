@@ -199,16 +199,11 @@ User-Interesse: "${user_intent}"
 Generiere eine Liste von Keywords, die ein Embedding-Modell ersetzen können. 
 Die Liste muss so umfassend sein, dass sie auch Artikel findet, die das Hauptwort nicht enthalten, aber semantisch relevant sind.
 
-Generiere Begriffe in folgenden Kategorien:
-1. **Synonyme & Verwandte Konzepte** (z.B. "Auto" -> "Fahrzeug", "Mobilität")
-2. **Unterbegriffe & Spezifikationen** (z.B. "KI" -> "LLM", "Neuronale Netze", "Machine Learning")
-3. **Wichtige Entitäten** (Firmen, Personen, Orte, die typischerweise vorkommen)
-4. **Englische Fachbegriffe** (da viele Feeds gemischt sind)
-
 ### REGELN
-- Max. 20-25 Begriffe insgesamt.
-- Keine zu allgemeinen Wörter (nicht "News", "Artikel").
-- Nur die Begriffe als JSON-Array zurückgeben.
+- Max. 15-20 Begriffe insgesamt.
+- **WICHTIG:** Vermeide extrem allgemeine Begriffe wie "Technik", "Innovation", "News", "Amazon", "Shop", "Angebot", "Preis".
+- Konzentriere dich auf spezifische Fachbegriffe, Entitäten (Firmen/Personen) und technische Konzepte.
+- Generiere Begriffe sowohl auf Deutsch als auch auf Englisch.
 
 ### OUTPUT FORMAT (JSON ONLY)
 {
@@ -226,6 +221,48 @@ Generiere Begriffe in folgenden Kategorien:
     } catch (error) {
         taskLogger.error('Error generating high precision keywords', error);
         return [user_intent]; 
+    }
+};
+
+const verifyArticleRelevanceTask = async ({ data: { article, user_intent, language = 'de' } }) => {
+    const prompt = `
+### ROLLE
+Strikter News-Kurator für B2B-Kunden. Deine Aufgabe ist es, HOCHRELEVANTE Artikel von allgemeinem Rauschen zu trennen.
+
+### INPUT
+User-Interesse: "${user_intent}"
+Artikel-Titel: "${article.title}"
+Artikel-Snippet: "${article.contentSnippet || article.snippet || ''}"
+
+### BEWERTUNGSKRITERIEN
+1. **Spezifische Relevanz (WICHTIG):** Passt der Artikel *exakt* auf die Nuancen des User-Interesses? 
+   - Beispiel: Wenn das Interesse "KI in der Chemie" ist, reicht ein allgemeiner "KI"-Artikel NICHT aus.
+   - Wenn das Interesse "Technik-Branche allgemein" ist, sind breite News okay.
+2. **Abgrenzung:** Unterscheide zwischen echten Nachrichten/Innovationen und bloßem Marketing, Preisvergleichen oder oberflächlichen "Bestenlisten".
+3. **B2B-Nutzen:** Bietet der Artikel einen Informationsvorsprung für ein Unternehmen?
+
+### AUFGABE
+Entscheide, ob der Artikel für den User relevant ist. Sei kritisch! 
+Wenn der Artikel nur "vage" passt, setze "relevant": false.
+
+### OUTPUT FORMAT (JSON ONLY)
+{
+  "relevant": true/false,
+  "reason": "Kurze, spezifische Begründung, warum es EXAKT zu diesem Interesse passt.",
+  "score": 0-100 (90-100: Perfekter Treffer, 70-89: Sehr gut, 40-69: Grenzwertig aber okay)
+}
+    `;
+
+    try {
+        const responseString = await callLocalAI(prompt, 0.0, true); 
+        const jsonMatch = responseString.match(/\{.*\}/s);
+        if (!jsonMatch) throw new Error("No JSON found");
+        
+        const result = JSON.parse(jsonMatch[0]);
+        return result;
+    } catch (error) {
+        taskLogger.error('Error verifying article relevance', error);
+        return { relevant: false, reason: "Error in verification", score: 0 };
     }
 };
 
@@ -262,4 +299,4 @@ Antworte NUR mit den Bulletpoints auf Deutsch. Kein Intro, kein Outro.
     }
 };
 
-module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateHighPrecisionKeywordsTask, generateMicroSummaryTask };
+module.exports = { orchestrateChatTask, selectCategoriesTask, generateGeneralKeywordsTask, generateHighPrecisionKeywordsTask, generateMicroSummaryTask, verifyArticleRelevanceTask };

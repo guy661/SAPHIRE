@@ -56,16 +56,20 @@ async function pollFeedsAndMatch() {
         
         // 3. Fetch Google News
         const googleArticlesMap = new Map();
-        for (const term of allSearchTerms) {
+        // Increase the term limit to 40 to ensure variety across multiple dashboards
+        const termsToSearch = Array.from(allSearchTerms).slice(0, 40);
+        
+        for (const term of termsToSearch) {
             const feedUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(term)}&hl=de&gl=DE&ceid=DE:de`;
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 10000);
+            const timeoutId = setTimeout(() => controller.abort(), 12000); // Slightly longer timeout
             try {
                 const response = await fetch(feedUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: controller.signal }).finally(() => clearTimeout(timeoutId));
                 if (response.ok) {
                     const xml = await response.text();
                     const feed = await parser.parseString(xml);
-                    feed.items.slice(0, 10).forEach(article => {
+                    // Take up to 20 items per term for a larger initial pool
+                    feed.items.slice(0, 20).forEach(article => {
                         if (minDate && article.pubDate && new Date(article.pubDate) <= minDate) return;
                         if (article.link && !googleArticlesMap.has(article.link)) {
                             article.sourceName = 'Google News';
@@ -81,10 +85,11 @@ async function pollFeedsAndMatch() {
         const allFetchedArticles = [...customArticles, ...Array.from(googleArticlesMap.values())];
         
         // Filter out URLs we've recently seen in this session to save AI CPU time
+        // But only if they were ALREADY matched or thoroughly rejected
         const newArticles = allFetchedArticles.filter(a => {
             if (!a || !a.link || recentArticlesCache.has(a.link)) return false;
             const content = a.contentSnippet || a.content || a.snippet || '';
-            if (content.trim().length < 100) return false;
+            if (content.trim().length < 80) return false;
             return true;
         });
         
@@ -132,7 +137,9 @@ async function pollFeedsAndMatch() {
             );
 
             for (const match of matchedArticles) {
-                const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, null);
+                // We use the AI reason as a temporary micro-summary so the user knows WHY it was picked
+                const aiReasonSummary = match.aiReason ? `[KI-Auswahl] ${match.aiReason}` : null;
+                const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, aiReasonSummary);
                 if (insertedArticle) {
                     totalMatches++;
                     schedulerLogger.info(`[Live-Feed] ✨ Neuer Treffer für Dashboard "${dashboard.name}": ${match.title}`);
