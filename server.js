@@ -38,12 +38,15 @@ async function main() {
         origin: function (origin, callback) {
             // Allow any origin that matches our expected domains
             if (!origin) return callback(null, true);
-            const isAllowed = origin.includes('localhost') || origin.includes('vercel.app');
+            const isAllowed = 
+                origin.includes('localhost') || 
+                origin.includes('vercel.app') || 
+                origin.includes('saphire-ai-news.de');
             callback(null, isAllowed ? origin : false);
         },
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         credentials: true,
-        optionsSuccessStatus: 200 // Some legacy browsers and proxies choke on 204
+        optionsSuccessStatus: 200
     }));
     app.use(express.json());
 
