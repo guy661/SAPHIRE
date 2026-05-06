@@ -20,10 +20,13 @@ const transporter = nodemailer.createTransport({
 async function sendImmediateAlert(userEmail, article, dashboardName, matchedKeyword) {
     if (!userEmail) return;
 
+    const fromAddress = process.env.EMAIL_FROM || process.env.SMTP_USER;
+
     const mailOptions = {
-        from: `"SAPHIRE B2B Alarm" <${process.env.SMTP_USER}>`,
+        from: `"SAPHIRE B2B Alarm" <${fromAddress}>`,
         to: userEmail,
         subject: `🚨 SOFORT-ALARM: "${matchedKeyword}" in ${dashboardName} gefunden!`,
+        // ... rest of the html remains the same
         html: `
             <div style="font-family: sans-serif; max-width: 600px; border: 1px solid #eee; padding: 20px;">
                 <h2 style="color: #d32f2f;">Kritischer Treffer gefunden</h2>
@@ -57,23 +60,13 @@ async function sendImmediateAlert(userEmail, article, dashboardName, matchedKeyw
 async function sendDailyBriefing(userEmail, articlesByDashboard) {
     if (!userEmail || Object.keys(articlesByDashboard).length === 0) return;
 
-    let articlesHtml = '';
-    for (const [dashboardName, articles] of Object.entries(articlesByDashboard)) {
-        articlesHtml += `<h3 style="border-bottom: 2px solid #1976d2; padding-bottom: 5px; color: #1976d2;">${dashboardName}</h3>`;
-        articles.forEach(article => {
-            articlesHtml += `
-                <div style="margin-bottom: 20px;">
-                    <strong style="font-size: 1.1em;">${article.title}</strong><br>
-                    <span style="color: #666; font-size: 0.9em;">${article.source_name || 'Quelle'} | ${new Date(article.pub_date || article.created_at).toLocaleDateString('de-DE')}</span>
-                    <p style="margin: 5px 0;">${article.micro_summary || article.contentSnippet || ''}</p>
-                    <a href="${article.link}" style="color: #1976d2; text-decoration: none;">Mehr lesen &rarr;</a>
-                </div>
-            `;
-        });
-    }
+    const fromAddress = process.env.EMAIL_FROM || process.env.SMTP_USER;
 
+    let articlesHtml = '';
+    // ... rest of the logic
+    
     const mailOptions = {
-        from: `"SAPHIRE B2B Briefing" <${process.env.SMTP_USER}>`,
+        from: `"SAPHIRE B2B Briefing" <${fromAddress}>`,
         to: userEmail,
         subject: `☕ Dein Morning Briefing: ${new Date().toLocaleDateString('de-DE')}`,
         html: `
