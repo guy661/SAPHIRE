@@ -1,3 +1,4 @@
+// Vercel Deployment Trigger: 2026-05-06 - Email Integration
 import { Routes, Route, Navigate, Outlet } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
 import LoginPage from './pages/LoginPage';
