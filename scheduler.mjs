@@ -2,8 +2,11 @@ import * as db from './database-postgres.js';
 import { getAggregatedFeed } from './rss-aggregator.js';
 import { filterArticlesByRelevanceLocal, embedArticles } from './local-ai.js';
 import { Logger, EMOJIS } from './utils.js';
+import { sendImmediateAlert, sendDailyBriefing } from './email-service.js';
 import fetch from 'node-fetch';
 import Parser from 'rss-parser';
+import cron from 'node-cron';
+import { DateTime } from 'luxon';
 
 const schedulerLogger = new Logger('Scheduler', 'yellow', EMOJIS.scheduler);
 const parser = new Parser();
@@ -85,7 +88,6 @@ async function pollFeedsAndMatch() {
         const allFetchedArticles = [...customArticles, ...Array.from(googleArticlesMap.values())];
         
         // Filter out URLs we've recently seen in this session to save AI CPU time
-        // But only if they were ALREADY matched or thoroughly rejected
         const newArticles = allFetchedArticles.filter(a => {
             if (!a || !a.link || recentArticlesCache.has(a.link)) return false;
             const content = a.contentSnippet || a.content || a.snippet || '';
@@ -115,7 +117,6 @@ async function pollFeedsAndMatch() {
         for (const dashboard of dashboards) {
             if (!dashboard.user_intent) continue;
 
-            // Only process articles that aren't already in this specific dashboard
             const articlesToProcess = [];
             for (const a of embeddedArticles) {
                 const alreadyInDb = await db.isArticleAlreadyInDashboard(dashboard.id, a.link);
@@ -128,7 +129,6 @@ async function pollFeedsAndMatch() {
 
             schedulerLogger.info(`[Live-Feed] Dashboard "${dashboard.name}": Vergleiche ${articlesToProcess.length} Kandidaten...`);
 
-            // Use pre-embedded articles for matching and precomputed dashboard intent embedding if available
             const matchedArticles = await filterArticlesByRelevanceLocal(
                 articlesToProcess, 
                 dashboard.user_intent, 
@@ -137,12 +137,32 @@ async function pollFeedsAndMatch() {
             );
 
             for (const match of matchedArticles) {
-                // We use the AI reason as a temporary micro-summary so the user knows WHY it was picked
                 const aiReasonSummary = match.aiReason ? `[KI-Auswahl] ${match.aiReason}` : null;
                 const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, aiReasonSummary);
+                
                 if (insertedArticle) {
                     totalMatches++;
                     schedulerLogger.info(`[Live-Feed] ✨ Neuer Treffer für Dashboard "${dashboard.name}": ${match.title}`);
+                    
+                    // --- KILL-KEYWORD CHECK (IMMEDIATE ALERT) ---
+                    const user = await db.getUserById(dashboard.user_id);
+                    if (user && user.email) {
+                        let killKeywords = dashboard.kill_keywords;
+                        if (typeof killKeywords === 'string') {
+                            try { killKeywords = JSON.parse(killKeywords); } catch (e) { killKeywords = []; }
+                        }
+                        
+                        if (Array.isArray(killKeywords) && killKeywords.length > 0) {
+                            const fullText = `${match.title} ${match.contentSnippet || match.snippet || ''}`.toLowerCase();
+                            const matchedKeyword = killKeywords.find(kw => fullText.includes(kw.toLowerCase()));
+                            
+                            if (matchedKeyword) {
+                                schedulerLogger.info(`[ALARM] Kill-Keyword "${matchedKeyword}" gefunden! Sende E-Mail an ${user.email}...`);
+                                await sendImmediateAlert(user.email, match, dashboard.name, matchedKeyword);
+                                await db.markArticlesAsSent([insertedArticle.id]);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -153,6 +173,37 @@ async function pollFeedsAndMatch() {
         schedulerLogger.error("Error during feed poll:", error);
     }
 }
+
+// --- DAILY BRIEFING SCHEDULER (7 AM Europe/Berlin) ---
+cron.schedule('0 7 * * *', async () => {
+    schedulerLogger.info('[Briefing] Starte tägliches Morning Briefing um 07:00 Uhr...');
+    try {
+        const dashboards = await db.getAllActiveDashboards();
+        const usersToNotify = new Set(dashboards.map(d => d.user_id));
+
+        for (const userId of usersToNotify) {
+            const user = await db.getUserById(userId);
+            if (!user || !user.email) continue;
+
+            const unsentArticles = await db.getUnsentArticlesForUser(userId);
+            if (unsentArticles.length === 0) continue;
+
+            const articlesByDashboard = {};
+            unsentArticles.forEach(a => {
+                if (!articlesByDashboard[a.dashboard_name]) articlesByDashboard[a.dashboard_name] = [];
+                articlesByDashboard[a.dashboard_name].push(a);
+            });
+
+            schedulerLogger.info(`[Briefing] Sende Zusammenfassung an ${user.email} (${unsentArticles.length} Artikel)...`);
+            await sendDailyBriefing(user.email, articlesByDashboard);
+            await db.markArticlesAsSent(unsentArticles.map(a => a.id));
+        }
+    } catch (err) {
+        schedulerLogger.error('[Briefing] Fehler beim Versand des Morning Briefings:', err);
+    }
+}, {
+    timezone: "Europe/Berlin"
+});
 
 function startScheduler() {
     schedulerLogger.info(`Starting live feed watcher (interval: ${CHECK_INTERVAL_MS / 1000}s).`);

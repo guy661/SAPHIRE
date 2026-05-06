@@ -1,12 +1,13 @@
 import { createContext, useState, useContext, ReactNode, useEffect } from 'react';
-import { loginUser as apiLogin, logoutUser as apiLogout, registerUser as apiRegister, getCurrentUser as apiGetCurrentUser } from '../services/api';
+import { loginUser as apiLogin, logoutUser as apiLogout, registerUser as apiRegister, getCurrentUser as apiGetCurrentUser, updateUserSettings as apiUpdateUserSettings } from '../services/api';
 import { CircularProgress, Box } from '@mui/material';
 
 // Define the shape of the context
 interface AuthContextType {
   user: any; // In a real app, you'd have a proper User type
   login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string, language: string) => Promise<void>;
+  register: (username: string, password: string, language: string, email: string) => Promise<void>;
+  updateEmail: (email: string) => Promise<void>;
   logout: () => void;
   isLoading: boolean;
 }
@@ -40,8 +41,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(userData);
   };
 
-  const register = async (username: string, password: string, language: string) => {
-    const userData = await apiRegister(username, password, language);
+  const register = async (username: string, password: string, language: string, email: string) => {
+    const userData = await apiRegister(username, password, language, email);
+    setUser(userData);
+  };
+
+  const updateEmail = async (email: string) => {
+    const userData = await apiUpdateUserSettings({ email });
     setUser(userData);
   };
 
@@ -50,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
-  const value = { user, login, register, logout, isLoading };
+  const value = { user, login, register, updateEmail, logout, isLoading };
 
   if (isLoading) {
       return (

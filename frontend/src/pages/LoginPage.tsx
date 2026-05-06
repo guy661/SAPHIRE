@@ -13,16 +13,17 @@ export default function LoginPage() {
     const data = new FormData(event.currentTarget);
     const username = data.get('username') as string;
     const password = data.get('password') as string;
+    const email = data.get('email') as string || '';
     const language = data.get('language') as string || 'de';
 
     if (!username || !password) {
-      setError('Benutzername und Passwort sind erforderlich.');
+      setError('Benutzername/E-Mail und Passwort sind erforderlich.');
       return;
     }
 
     try {
       if (isRegister) {
-        await register(username, password, language);
+        await register(username, password, language, email);
       } else {
         await login(username, password);
       }
@@ -53,7 +54,7 @@ export default function LoginPage() {
             required
             fullWidth
             id="username"
-            label="Benutzername"
+            label={isRegister ? "Benutzername" : "Benutzername oder E-Mail"}
             name="username"
             autoComplete="username"
             autoFocus
@@ -67,23 +68,33 @@ export default function LoginPage() {
             type="password"
             id="password"
             autoComplete="current-password"
-            helperText="Nutze 'TESTuser' für den Schnellzugriff"
+            helperText={isRegister ? "" : "Nutze 'TESTuser' für den Schnellzugriff"}
           />
           
           {isRegister && (
-            <TextField
-              margin="normal"
-              required
-              fullWidth
-              select
-              name="language"
-              label="Sprache"
-              defaultValue="de"
-              id="language"
-            >
-              <MenuItem value="de">Deutsch</MenuItem>
-              <MenuItem value="en">English</MenuItem>
-            </TextField>
+            <>
+              <TextField
+                margin="normal"
+                fullWidth
+                id="email"
+                label="E-Mail Adresse (optional)"
+                name="email"
+                autoComplete="email"
+              />
+              <TextField
+                margin="normal"
+                required
+                fullWidth
+                select
+                name="language"
+                label="Sprache"
+                defaultValue="de"
+                id="language"
+              >
+                <MenuItem value="de">Deutsch</MenuItem>
+                <MenuItem value="en">English</MenuItem>
+              </TextField>
+            </>
           )}
 
           <Button

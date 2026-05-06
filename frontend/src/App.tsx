@@ -5,6 +5,7 @@ import DashboardPage from './pages/DashboardPage';
 import DashboardDetailPage from './pages/DashboardDetailPage';
 import ChatPage from './pages/ChatPage';
 import DashboardSettingsPage from './pages/DashboardSettingsPage';
+import UserSettingsPage from './pages/UserSettingsPage';
 import MainLayout from './layouts/MainLayout';
 
 // This component handles routes that are only accessible when a user is logged IN.
@@ -42,7 +43,7 @@ function App() {
           <Route path="/dashboard/:id" element={<DashboardDetailPage />} />
           <Route path="/dashboard/:dashboardId/edit" element={<ChatPage />} />
           <Route path="/dashboard/:dashboardId/settings" element={<DashboardSettingsPage />} />
-          {/* Add other protected routes here, e.g., /settings */}
+          <Route path="/settings" element={<UserSettingsPage />} />
         </Route>
         
         {/* Fallback route */}

@@ -4,11 +4,11 @@ const { Logger, EMOJIS } = require('./utils');
 
 const dbLogger = new Logger('Database', 'cyan', EMOJIS.db);
 
-async function createUser(username, password, language) {
+async function createUser(username, password, language, email = null) {
     const hashedPassword = await bcrypt.hash(password, 10);
     const res = await pool.query(
-        'INSERT INTO users (username, password, language) VALUES ($1, $2, $3) RETURNING id, username, language',
-        [username, hashedPassword, language]
+        'INSERT INTO users (username, password, language, email) VALUES ($1, $2, $3, $4) RETURNING id, username, email, language',
+        [username, hashedPassword, language, email]
     );
     return res.rows[0];
 }
@@ -18,8 +18,21 @@ async function getUserByUsername(username) {
     return res.rows[0];
 }
 
+async function getUserByUsernameOrEmail(identifier) {
+    const res = await pool.query('SELECT * FROM users WHERE username = $1 OR email = $2', [identifier, identifier]);
+    return res.rows[0];
+}
+
 async function getUserById(id) {
     const res = await pool.query('SELECT * FROM users WHERE id = $1', [id]);
+    return res.rows[0];
+}
+
+async function updateUserEmail(userId, email) {
+    const res = await pool.query(
+        'UPDATE users SET email = $1 WHERE id = $2 RETURNING id, username, email',
+        [email, userId]
+    );
     return res.rows[0];
 }
 
@@ -65,18 +78,19 @@ async function updateDashboardSearchTerms(dashboardId, searchTerms) {
     return res.rows[0];
 }
 
-async function updateDashboardSettings(dashboardId, { name, summary_style, is_active, user_intent, user_intent_embedding }) {
+async function updateDashboardSettings(dashboardId, { name, summary_style, is_active, user_intent, user_intent_embedding, kill_keywords }) {
     const current = await getDashboardById(dashboardId);
     const newSettings = {
         name: name !== undefined ? name : current.name,
         summary_style: summary_style !== undefined ? summary_style : current.summary_style,
         is_active: is_active !== undefined ? is_active : current.is_active,
         user_intent: user_intent !== undefined ? user_intent : current.user_intent,
-        user_intent_embedding: user_intent_embedding !== undefined ? user_intent_embedding : current.user_intent_embedding
+        user_intent_embedding: user_intent_embedding !== undefined ? user_intent_embedding : current.user_intent_embedding,
+        kill_keywords: kill_keywords !== undefined ? kill_keywords : current.kill_keywords
     };
     const res = await pool.query(
-        'UPDATE dashboards SET name = $1, summary_style = $2, is_active = $3, user_intent = $4, user_intent_embedding = $5, updated_at = CURRENT_TIMESTAMP WHERE id = $6 RETURNING *',
-        [newSettings.name, newSettings.summary_style, newSettings.is_active, newSettings.user_intent, newSettings.user_intent_embedding, dashboardId]
+        'UPDATE dashboards SET name = $1, summary_style = $2, is_active = $3, user_intent = $4, user_intent_embedding = $5, kill_keywords = $6, updated_at = CURRENT_TIMESTAMP WHERE id = $7 RETURNING *',
+        [newSettings.name, newSettings.summary_style, newSettings.is_active, newSettings.user_intent, newSettings.user_intent_embedding, JSON.stringify(newSettings.kill_keywords), dashboardId]
     );
     return res.rows[0];
 }
@@ -94,8 +108,6 @@ async function addDashboardArticle(dashboardId, article, relevanceScore, microSu
     const { title, link, pubDate, sourceName } = article;
     
     // --- SIMPLE DEDUPLICATION LOGIC ---
-    // We check if an article with a very similar title already exists in this dashboard
-    // from the last 24 hours. This prevents "copy-paste" news from filling the feed.
     const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '').trim();
     
     try {
@@ -112,7 +124,6 @@ async function addDashboardArticle(dashboardId, article, relevanceScore, microSu
         );
 
         if (existingRes.rows.length > 0) {
-            // dbLogger.info(`Skipping duplicate article for dashboard ${dashboardId}: ${title}`);
             return null; // Skip insertion
         }
     } catch (err) {
@@ -128,16 +139,6 @@ async function addDashboardArticle(dashboardId, article, relevanceScore, microSu
         [dashboardId, title, link, sourceName || 'Unknown', pubDate ? new Date(pubDate) : null, relevanceScore, microSummary]
     );
     return res.rows[0];
-}
-
-async function findExistingSummaryByLink(link) {
-    const res = await pool.query(
-        `SELECT micro_summary FROM dashboard_articles 
-         WHERE link = $1 AND micro_summary IS NOT NULL AND micro_summary != '' 
-         LIMIT 1`,
-        [link]
-    );
-    return res.rows[0] ? res.rows[0].micro_summary : null;
 }
 
 async function getDashboardArticles(dashboardId, limit = 50) {
@@ -183,10 +184,32 @@ async function deleteOldArticles(days = 7) {
     return res.rowCount;
 }
 
+async function getUnsentArticlesForUser(userId) {
+    const res = await pool.query(
+        `SELECT a.*, d.name as dashboard_name 
+         FROM dashboard_articles a
+         JOIN dashboards d ON a.dashboard_id = d.id
+         WHERE d.user_id = $1 AND a.email_sent = false
+         ORDER BY a.created_at ASC`,
+        [userId]
+    );
+    return res.rows;
+}
+
+async function markArticlesAsSent(articleIds) {
+    if (!articleIds || articleIds.length === 0) return;
+    await pool.query(
+        'UPDATE dashboard_articles SET email_sent = true WHERE id = ANY($1)',
+        [articleIds]
+    );
+}
+
 module.exports = {
     createUser,
     getUserByUsername,
+    getUserByUsernameOrEmail,
     getUserById,
+    updateUserEmail,
     createDashboard,
     getDashboardById,
     getDashboardsByUserId,
@@ -201,5 +224,7 @@ module.exports = {
     updateDashboardArticleSummary,
     isArticleAlreadyInDashboard,
     findExistingSummaryByLink,
-    deleteOldArticles
+    deleteOldArticles,
+    getUnsentArticlesForUser,
+    markArticlesAsSent
 };

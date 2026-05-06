@@ -1,6 +1,6 @@
 const getApiBaseUrl = () => {
   const envUrl = import.meta.env.VITE_API_URL;
-  if (!envUrl) return 'http://localhost:3000/api';
+  if (!envUrl) return 'http://localhost:3001/api'; // Changed to 3001 as per server.js
   return envUrl.endsWith('/api') ? envUrl : `${envUrl}/api`;
 };
 
@@ -21,10 +21,9 @@ async function handleResponse(response: Response) {
 // Wrapper for fetch that always includes credentials
 async function fetchWithAuth(url: string, options: RequestInit = {}) {
     const defaultOptions: RequestInit = {
-        credentials: 'include', // CRITICAL for sending cookies across origins (port 5173 -> 3001)
+        credentials: 'include',
     };
     
-    // Merge headers correctly
     const headers = {
         ...(options.headers || {}),
     };
@@ -41,11 +40,11 @@ export async function loginUser(username, password) {
   return handleResponse(response);
 }
 
-export async function registerUser(username, password, language) {
+export async function registerUser(username, password, language, email) {
     const response = await fetchWithAuth(`${API_BASE_URL}/register`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password, language }),
+      body: JSON.stringify({ username, password, language, email }),
     });
     return handleResponse(response);
 }
@@ -56,6 +55,15 @@ export async function logoutUser() {
 
 export async function getCurrentUser() {
     const response = await fetchWithAuth(`${API_BASE_URL}/user`);
+    return handleResponse(response);
+}
+
+export async function updateUserSettings(settings: { email: string }) {
+    const response = await fetchWithAuth(`${API_BASE_URL}/user/settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(settings),
+    });
     return handleResponse(response);
 }
 
@@ -105,7 +113,8 @@ export async function updateDashboardSettings(id: string, settings: {
     summary_style?: string, 
     is_active?: boolean, 
     user_intent?: string, 
-    user_intent_embedding?: number[] 
+    user_intent_embedding?: number[],
+    kill_keywords?: string[]
 }) {
     const response = await fetchWithAuth(`${API_BASE_URL}/dashboards/${id}`, {
         method: 'PUT',

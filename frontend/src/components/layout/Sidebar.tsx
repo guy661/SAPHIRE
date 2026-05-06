@@ -4,6 +4,7 @@ import {
     DialogContentText, DialogTitle, TextField, Button, ListSubheader
 } from '@mui/material';
 import DashboardIcon from '@mui/icons-material/Dashboard';
+import SettingsIcon from '@mui/icons-material/Settings';
 import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import AddCircleOutlineIcon from '@mui/icons-material/AddCircleOutline';
 import { NavLink, useNavigate } from 'react-router-dom';
@@ -62,6 +63,35 @@ export default function SidebarContent({ open, toggleDrawer }: SidebarContentPro
                     <ChevronLeftIcon sx={{ transform: open ? 'rotate(0deg)' : 'rotate(180deg)', transition: 'transform 0.2s' }} />
                 </IconButton>
             </Box>
+            <Divider />
+
+            {/* Main Navigation */}
+            <List sx={{ p: open ? 1 : '8px 0' }}>
+                <ListItemButton
+                    component={NavLink}
+                    to="/settings"
+                    title="Konto-Einstellungen"
+                    sx={{
+                        margin: '4px auto',
+                        width: 'calc(100% - 16px)',
+                        borderRadius: '8px',
+                        justifyContent: open ? 'initial' : 'center',
+                        px: 2.5,
+                        '&.active': {
+                            backgroundColor: theme.palette.action.selected,
+                            '& .MuiListItemIcon-root': {
+                                color: theme.palette.primary.main,
+                            },
+                        },
+                    }}
+                >
+                    <ListItemIcon sx={{ minWidth: 0, mr: open ? 3 : 'auto', justifyContent: 'center', transition: 'margin .2s' }}>
+                        <SettingsIcon fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText primary="Konto" sx={{ opacity: open ? 1 : 0, transition: 'opacity .2s' }} />
+                </ListItemButton>
+            </List>
+
             <Divider />
 
             {/* Navigation & Dashboard List */}

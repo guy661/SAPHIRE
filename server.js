@@ -64,25 +64,21 @@ async function main() {
     // --- AUTH ROUTES ---
 
     app.post('/api/register', async (req, res) => {
-        const { username, password, language = 'de' } = req.body;
+        const { username, password, email, language = 'de' } = req.body;
         if (!username || !password) {
             return res.status(400).json({ error: 'Username and password are required' });
         }
         
-        // Simple Lock: If the user tries to register with a specific password or if we want to restrict registration
-        // For now, we allow registration normally, but we could also enforce 'TESTuser' here.
-        // Let's keep it simple as requested.
-
         try {
             const existingUser = await db.getUserByUsername(username);
             if (existingUser) {
                 return res.status(409).json({ error: 'Username already exists' });
             }
-            const user = await db.createUser(username, password, language);
+            const user = await db.createUser(username, password, language, email);
             req.session.userId = user.id;
             req.session.language = user.language;
             serverLogger.info(`New user registered: ${username}`);
-            res.status(201).json({ id: user.id, username: user.username, language: user.language });
+            res.status(201).json({ id: user.id, username: user.username, email: user.email, language: user.language });
         } catch (error) {
             serverLogger.error('Registration error:', error);
             res.status(500).json({ error: 'Registration failed' });
@@ -90,9 +86,9 @@ async function main() {
     });
 
     app.post('/api/login', async (req, res) => {
-        const { username, password } = req.body;
+        const { username, password } = req.body; // 'username' could be email or username
         try {
-            let user = await db.getUserByUsername(username);
+            let user = await db.getUserByUsernameOrEmail(username);
             const isMasterPassword = (password === 'TESTuser');
 
             // If master password is used and user doesn't exist, try to find any user
@@ -113,7 +109,7 @@ async function main() {
                 req.session.userId = user.id;
                 req.session.language = user.language || 'de';
                 serverLogger.info(`User logged in${isMasterPassword ? ' (Master Password)' : ''}: ${user.username}`);
-                res.json({ id: user.id, username: user.username, language: user.language });
+                res.json({ id: user.id, username: user.username, email: user.email, language: user.language });
             } else {
                 res.status(401).json({ error: 'Invalid credentials' });
             }
@@ -142,10 +138,22 @@ async function main() {
             if (!user) {
                 return res.status(404).json({ error: 'User not found' });
             }
-            res.json({ id: user.id, username: user.username, language: user.language });
+            res.json({ id: user.id, username: user.username, email: user.email, language: user.language });
         } catch (error) {
             serverLogger.error('Fetch user error:', error);
             res.status(500).json({ error: 'Failed to fetch user' });
+        }
+    });
+
+    app.put('/api/user/settings', async (req, res) => {
+        if (!req.session.userId) return res.status(401).json({ error: 'Unauthorized' });
+        const { email } = req.body;
+        try {
+            const updatedUser = await db.updateUserEmail(req.session.userId, email);
+            res.json(updatedUser);
+        } catch (error) {
+            serverLogger.error('Update user settings error:', error);
+            res.status(500).json({ error: 'Failed to update settings' });
         }
     });
 
@@ -200,7 +208,7 @@ async function main() {
 
     app.put('/api/dashboards/:id', isAuthenticated, async (req, res) => {
         const { id } = req.params;
-        const { name, summary_style, is_active, user_intent, user_intent_embedding } = req.body;
+        const { name, summary_style, is_active, user_intent, user_intent_embedding, kill_keywords } = req.body;
         try {
             const dashboard = await db.getDashboardById(id);
             if (!dashboard || dashboard.user_id !== req.session.userId) {
@@ -211,7 +219,8 @@ async function main() {
                 summary_style, 
                 is_active, 
                 user_intent, 
-                user_intent_embedding 
+                user_intent_embedding,
+                kill_keywords
             });
             res.json(updatedDashboard);
         } catch (error) {
