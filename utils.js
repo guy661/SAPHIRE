@@ -165,8 +165,10 @@ async function executeGeminiCall(messages, temperature, jsonMode, tools) {
     // Extract the very last message to send
     const lastMessage = filteredHistory.pop();
 
+    const geminiModel = process.env.GEMINI_MODEL || "gemma-4-31b";
+
     const model = genAI.getGenerativeModel({ 
-        model: "gemini-1.5-flash",
+        model: geminiModel,
         systemInstruction: systemInstruction,
         generationConfig: {
             temperature: temperature,
