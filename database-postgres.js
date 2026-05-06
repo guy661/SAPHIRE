@@ -104,7 +104,7 @@ async function getAllActiveDashboards() {
     return res.rows;
 }
 
-async function addDashboardArticle(dashboardId, article, relevanceScore, microSummary) {
+async function addDashboardArticle(dashboardId, article, relevanceScore, microSummary, relevanceReason = null) {
     const { title, link, pubDate, sourceName } = article;
     
     // --- SIMPLE DEDUPLICATION LOGIC ---
@@ -132,11 +132,11 @@ async function addDashboardArticle(dashboardId, article, relevanceScore, microSu
 
     dbLogger.info(`Adding article to dashboard ${dashboardId}: ${title}`);
     const res = await pool.query(
-        `INSERT INTO dashboard_articles (dashboard_id, title, link, source_name, pub_date, relevance_score, micro_summary)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO dashboard_articles (dashboard_id, title, link, source_name, pub_date, relevance_score, micro_summary, relevance_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (dashboard_id, link) DO NOTHING
          RETURNING *`,
-        [dashboardId, title, link, sourceName || 'Unknown', pubDate ? new Date(pubDate) : null, relevanceScore, microSummary]
+        [dashboardId, title, link, sourceName || 'Unknown', pubDate ? new Date(pubDate) : null, relevanceScore, microSummary, relevanceReason]
     );
     return res.rows[0];
 }

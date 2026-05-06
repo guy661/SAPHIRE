@@ -222,6 +222,23 @@ export default function DashboardDetailPage() {
                                         </Typography>
                                     </Link>
 
+                                    {/* AI Selection Reason (Subtle) */}
+                                    {article.relevance_reason && (
+                                        <Typography variant="caption" sx={{ 
+                                            display: 'block', 
+                                            mb: 1, 
+                                            fontStyle: 'italic', 
+                                            color: 'text.secondary',
+                                            bgcolor: 'rgba(25, 118, 210, 0.05)',
+                                            p: 1,
+                                            borderRadius: 1,
+                                            borderLeft: '3px solid',
+                                            borderColor: 'primary.light'
+                                        }}>
+                                            <b>KI-Begründung:</b> {article.relevance_reason}
+                                        </Typography>
+                                    )}
+
                                     {article.micro_summary ? (
                                         <Box sx={{ mt: 2, p: 2, bgcolor: 'action.hover', borderRadius: 2 }}>
                                             <ReactMarkdown 

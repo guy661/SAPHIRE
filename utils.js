@@ -166,7 +166,7 @@ async function executeGeminiCall(messages, temperature, jsonMode, tools) {
     const lastMessage = filteredHistory.pop();
 
     const model = genAI.getGenerativeModel({ 
-        model: "gemma-4-31b",
+        model: "gemini-1.5-flash",
         systemInstruction: systemInstruction,
         generationConfig: {
             temperature: temperature,

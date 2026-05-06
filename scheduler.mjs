@@ -137,8 +137,13 @@ async function pollFeedsAndMatch() {
             );
 
             for (const match of matchedArticles) {
-                const aiReasonSummary = match.aiReason ? `[KI-Auswahl] ${match.aiReason}` : null;
-                const insertedArticle = await db.addDashboardArticle(dashboard.id, match, match.relevanceScore, aiReasonSummary);
+                const insertedArticle = await db.addDashboardArticle(
+                    dashboard.id, 
+                    match, 
+                    match.relevanceScore, 
+                    null, // micro_summary is null initially so the user can trigger it
+                    match.aiReason // Store the reason separately
+                );
                 
                 if (insertedArticle) {
                     totalMatches++;
